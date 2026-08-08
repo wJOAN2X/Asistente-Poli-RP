@@ -9,32 +9,40 @@ class RPSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.groq = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
-        
-        # MEMORIA RAM / CACHÉ INTELIGENTE (Para responder rápido sin depender de bases de datos lentas)
-        self.cache_manuales = ""
-        self.cache_ejemplos = {} # Guarda los ejemplos por cada usuario en memoria
+        self.txt_file_path = "manual_unificado.txt"
+        self.cache_ejemplos = {}
 
-    async def cargar_manuales_globales(self, guild):
-        """Lee el canal #manuales una vez y lo guarda en caché para velocidad máxima."""
-        if self.cache_manuales: return self.cache_manuales
-        
-        texto_global = ""
+    async def actualizar_archivo_manuales(self, guild):
+        """Descarga PDFs del canal #manuales, los procesa a texto y los consolida en un único archivo plano."""
         ch_manuales = discord.utils.get(guild.channels, name="manuales")
-        if ch_manuales:
-            async for m in ch_manuales.history(limit=15):
-                if m.content: texto_global += f"\n{m.content}\n"
-                for att in m.attachments:
-                    if att.filename.endswith('.pdf'):
-                        try:
-                            pdf = PdfReader(io.BytesIO(await att.read()))
-                            texto_global += "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
-                        except Exception:
-                            pass
-        self.cache_manuales = texto_global
-        return self.cache_manuales
+        if not ch_manuales: return
+        
+        texto_consolidado = ""
+        async for m in ch_manuales.history(limit=25):
+            if m.content: texto_consolidado += f"\n{m.content}\n"
+            for att in m.attachments:
+                if att.filename.endswith('.pdf'):
+                    try:
+                        pdf = PdfReader(io.BytesIO(await att.read()))
+                        texto_consolidado += "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()]) + "\n"
+                    except Exception:
+                        pass
+        
+        if texto_consolidado.strip():
+            with open(self.txt_file_path, "w", encoding="utf-8") as f:
+                f.write(texto_consolidado)
+
+    async def leer_manuales_txt(self, guild):
+        """Lee el archivo consolidado de manera ultrarrápida. Si no existe, lo crea."""
+        if not os.path.exists(self.txt_file_path):
+            await self.actualizar_archivo_manuales(guild)
+        
+        if os.path.exists(self.txt_file_path):
+            with open(self.txt_file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return "No hay manuales cargados."
 
     async def cargar_ejemplos_usuario(self, ch_ejemplos):
-        """Lee los ejemplos de estilo del usuario y los almacena en caché."""
         ch_id = ch_ejemplos.id
         if ch_id in self.cache_ejemplos:
             return self.cache_ejemplos[ch_id]
@@ -67,8 +75,8 @@ class RPSystem(commands.Cog):
         ch_i = await g.create_text_channel("📋-informes", category=cat)
         ch_n = await g.create_text_channel("💭-registro-y-dudas", category=cat)
 
-        await ch_e.send(f"📌 **BASE DE APRENDIZAJE**\n{u.mention} Pega aquí tus informes pasados. La IA los leerá para aprender tu estructura y estilo.")
-        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Escribe tus notas, pide internas o escribe 'redacta el informe' para procesarlo al instante.")
+        await ch_e.send(f"📌 **BASE DE APRENDIZAJE**\n{u.mention} Pega aquí tus informes pasados para que la IA aprenda tu estilo.")
+        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Pide internas, haz preguntas sobre el manual, sube imágenes/audios o escribe 'redacta el informe'.")
         
         await interaction.followup.send(f"✅ Canales listos: {cat.jump_url}")
 
@@ -85,7 +93,7 @@ class RPSystem(commands.Cog):
         if ch_e: 
             if ch_e.id in self.cache_ejemplos: del self.cache_ejemplos[ch_e.id]
             await ch_e.purge(limit=50)
-            await ch_e.send("🧹 **Canal de ejemplos limpiado y caché reseteada.**")
+            await ch_e.send("🧹 **Canal de ejemplos limpiado.**")
             
         if ch_n: 
             await ch_n.purge(limit=50)
@@ -97,28 +105,50 @@ class RPSystem(commands.Cog):
     async def on_message(self, msg: discord.Message):
         if msg.author.bot: return
 
-        # Si actualizan manuales o ejemplos en vivo, reseteamos la caché al instante para que aprendan lo nuevo
+        # Si suben algo al canal manuales, borramos el txt viejo y creamos uno completamente nuevo y actualizado
         if msg.channel.name == "manuales":
-            self.cache_manuales = ""
+            if os.path.exists(self.txt_file_path):
+                os.remove(self.txt_file_path)
+            await self.actualizar_archivo_manuales(msg.guild)
             await msg.add_reaction("✅")
             return
             
         if msg.channel.name == "📚-ejemplos-pasados":
             if msg.channel.id in self.cache_ejemplos:
-                del self.cache_ejemplos[msg.channel.id] # Borra caché para obligar a releer lo nuevo que pegó
+                del self.cache_ejemplos[msg.channel.id]
             await msg.add_reaction("✅")
             return
 
         # ZONA DE TRABAJO EN EL CANAL DE DUDAS Y REGISTRO
         if msg.channel.name == "💭-registro-y-dudas":
-            await msg.add_reaction("👀") # Confirmación visual inmediata de lectura
+            await msg.add_reaction("👀")
             
             async with msg.channel.typing():
                 try:
-                    # 1. Cargar Manuales Globales en Velocidad Luz
-                    manuales_texto = await self.cargar_manuales_globales(msg.guild)
+                    # Análisis visual de imágenes si las hay
+                    imagen_analisis = ""
+                    if msg.attachments:
+                        for att in msg.attachments:
+                            if att.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                                try:
+                                    vision_res = await self.groq.chat.completions.create(
+                                        messages=[{
+                                            "role": "user", 
+                                            "content": [
+                                                {"type": "text", "text": "Extrae todo el texto, tablas, ascensos, rangos o información relevante que aparezca en esta imagen."},
+                                                {"type": "image_url", "image_url": {"url": att.url}}
+                                            ]
+                                        }],
+                                        model="llama-3.2-11b-vision-preview"
+                                    ]
+                                    imagen_analisis += f"\n[Datos extraídos de imagen adjunta]:\n{vision_res.choices[0].message.content}\n"
+                                except Exception:
+                                    pass
 
-                    # 2. Cargar Ejemplos Personales del Usuario en Caché
+                    # Leer manuales desde el archivo de texto plano consolidado
+                    manuales_texto = await self.leer_manuales_txt(msg.guild)
+
+                    # Cargar ejemplos del usuario
                     cat = msg.channel.category
                     textos_ejemplos = ""
                     if cat:
@@ -126,34 +156,34 @@ class RPSystem(commands.Cog):
                         if ch_e:
                             textos_ejemplos = await self.cargar_ejemplos_usuario(ch_e)
 
-                    # 3. Historial reciente del chat actual
                     historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=10) if not m.author.bot])
 
-                    # Prompt optimizado para velocidad y precisión total
                     sys_prompt = f"""
                     Eres el asistente operativo y de redacción policial de este servidor de Roleplay.
                     
-                    RECURSOS OFICIALES (Leyes y Manuales):
-                    {manuales_texto[:6000]}
+                    RECURSOS OFICIALES (Leyes y Manuales consolidados):
+                    {manuales_texto[:7000]}
+                    
+                    DATOS DE IMÁGENES RECIENTES / ACTUALIZACIONES (Ascensos, capturas, etc.):
+                    {imagen_analisis}
                     
                     EJEMPLOS DE ESTILO Y FORMATO DEL OFICIAL:
                     {textos_ejemplos[:4000]}
                     
                     INSTRUCCIONES CLAVE:
-                    - Si el usuario pide una interna, copy o procedimiento del manual, da el texto exacto, claro y profesional.
-                    - Si el usuario pide redactar un informe, toma los datos recientes del chat y ajústalos estrictamente al formato y estructura que muestran los EJEMPLOS DE ESTILO.
-                    - Responde directo al grano, sin rodeos ni saludos innecesarios.
+                    - Responde rápido y de forma directa.
+                    - Si te preguntan por un ascenso, código o procedimiento, búscalo en los manuales o en los datos de imágenes y respóndelo con precisión.
+                    - Si el usuario pide redactar un informe, toma los datos recientes del chat y ajústalos estrictamente al formato y estructura de los EJEMPLOS DE ESTILO.
                     """
 
                     res = await self.groq.chat.completions.create(
-                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content}],
+                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Analiza el contenido adjunto."}],
                         model="llama-3.3-70b-versatile",
                         temperature=0.2
                     )
 
                     respuesta = res.choices[0].message.content
 
-                    # Si es un informe, mandarlo limpio al canal de informes de su categoría
                     if "informe" in msg.content.lower() or "redacta" in msg.content.lower():
                         if cat:
                             ch_i = discord.utils.get(cat.channels, name="📋-informes")
@@ -163,7 +193,6 @@ class RPSystem(commands.Cog):
                                 await msg.add_reaction("✅")
                                 return await msg.reply("✅ Informe redactado y enviado a tu canal de informes.")
 
-                    # Respuesta estándar para internas, copys y dudas
                     await msg.remove_reaction("👀", self.bot.user)
                     await msg.add_reaction("✅")
                     await msg.reply(respuesta)
