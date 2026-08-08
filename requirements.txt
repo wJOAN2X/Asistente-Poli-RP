@@ -1,0 +1,6 @@
+discord.py
+groq
+PyPDF2
+aiosqlite
+Flask
+python-dotenv
