@@ -4,3 +4,4 @@ PyPDF2
 aiosqlite
 Flask
 python-dotenv
+chat-exporter
