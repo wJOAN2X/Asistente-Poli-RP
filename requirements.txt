@@ -5,3 +5,4 @@ aiosqlite
 Flask
 python-dotenv
 chat-exporter
+PyNaCl
