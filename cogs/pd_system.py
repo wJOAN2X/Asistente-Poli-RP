@@ -53,7 +53,15 @@ class RPSystem(commands.Cog):
         self.cache_ejemplos[ch_id] = textos_ejemplos
         return self.cache_ejemplos[ch_id]
 
-    @app_commands.command(name="alta_personaje", description="Crea tus canales de trabajo.")
+    async def enviar_texto_largo(self, canal, texto, msg_original=None):
+        pedazos = [texto[i:i+1900] for i in range(0, len(texto), 1900)]
+        for idx, pedazo in enumerate(pedazos):
+            if idx == 0 and msg_original:
+                await msg_original.reply(pedazo)
+            else:
+                await canal.send(pedazo)
+
+    @app_commands.command(name="alta_personaje", description="Crea tus canales de trabajo y ajusta tu nombre.")
     async def alta(self, interaction: discord.Interaction, nombre_personaje: str, faccion: str, rango: str):
         await interaction.response.defer(ephemeral=True)
         g, u = interaction.guild, interaction.user
@@ -73,10 +81,56 @@ class RPSystem(commands.Cog):
         ch_i = await g.create_text_channel("📋-informes", category=cat)
         ch_n = await g.create_text_channel("💭-registro-y-dudas", category=cat)
 
+        # Intento de cambiar el apodo automáticamente
+        nuevo_apodo = f"[{rango}] {nombre_personaje}"
+        aviso_apodo = ""
+        try:
+            await u.edit(nick=nuevo_apodo[:32])
+        except discord.Forbidden:
+            aviso_apodo = "\n*(No pude cambiar tu apodo porque eres el dueño del servidor o tienes un rol mayor al mío).* "
+
         await ch_e.send(f"📌 **BASE DE APRENDIZAJE**\n{u.mention} Pega aquí tus informes pasados para que la IA aprenda tu estilo.")
         await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Pide internas, haz preguntas sobre el manual, sube imágenes/audios o escribe 'redacta el informe'.")
         
-        await interaction.followup.send(f"✅ Canales listos: {cat.jump_url}")
+        await interaction.followup.send(f"✅ Canales listos: {cat.jump_url}{aviso_apodo}")
+
+    @app_commands.command(name="actualizar_rango", description="Actualiza tu rango por un ascenso (renombra tus canales, rol y apodo).")
+    async def actualizar_rango(self, interaction: discord.Interaction, nuevo_rango: str):
+        await interaction.response.defer(ephemeral=True)
+        cat = interaction.channel.category
+        u = interaction.user
+
+        if not cat:
+            return await interaction.followup.send("❌ Usa este comando dentro de tu categoría de trabajo.")
+        
+        # Desglosar el nombre actual de la categoría para no perder la facción ni el personaje
+        # Formato esperado: "Faccion | Rango - Nombre"
+        try:
+            partes = cat.name.split(" | ", 1)
+            faccion = partes[0]
+            nombre_personaje = partes[1].split(" - ", 1)[1]
+        except Exception:
+            return await interaction.followup.send("❌ El nombre de tu categoría fue modificado manualmente o está corrupto. No puedo automatizar el ascenso.")
+
+        nuevo_nombre_completo = f"{faccion} | {nuevo_rango} - {nombre_personaje}"
+        nuevo_apodo = f"[{nuevo_rango}] {nombre_personaje}"
+
+        # 1. Actualizar el Rol
+        rol_existente = discord.utils.get(u.roles, name=cat.name)
+        if rol_existente:
+            await rol_existente.edit(name=nuevo_nombre_completo)
+
+        # 2. Actualizar la Categoría
+        await cat.edit(name=nuevo_nombre_completo)
+
+        # 3. Actualizar Apodo
+        aviso_apodo = ""
+        try:
+            await u.edit(nick=nuevo_apodo[:32])
+        except discord.Forbidden:
+            aviso_apodo = "\n*(Tus canales se actualizaron, pero no pude cambiar tu apodo por falta de permisos/jerarquía).* "
+
+        await interaction.followup.send(f"🎖️ **¡Ascenso procesado!** Ahora eres **{nuevo_rango}**.\nCanales y roles actualizados correctamente.{aviso_apodo}")
 
     @app_commands.command(name="borrar_historial", description="Limpia la caché y memoria de tus canales.")
     async def borrar_historial(self, interaction: discord.Interaction):
@@ -135,7 +189,7 @@ class RPSystem(commands.Cog):
                                             ]
                                         }],
                                         model="llama-3.2-11b-vision-preview"
-                                    ) # <--- AQUÍ ESTABA EL ERROR MALDITO, ESTABA COMO "]"
+                                    )
                                     imagen_analisis += f"\n[Datos extraídos de imagen adjunta]:\n{vision_res.choices[0].message.content}\n"
                                 except Exception:
                                     pass
@@ -181,14 +235,15 @@ class RPSystem(commands.Cog):
                         if cat:
                             ch_i = discord.utils.get(cat.channels, name="📋-informes")
                             if ch_i:
-                                await ch_i.send(f"📋 **INFORME GENERADO:**\n\n{respuesta}")
+                                texto_informe = f"📋 **INFORME GENERADO:**\n\n{respuesta}"
+                                await self.enviar_texto_largo(ch_i, texto_informe)
                                 await msg.remove_reaction("👀", self.bot.user)
                                 await msg.add_reaction("✅")
                                 return await msg.reply("✅ Informe redactado y enviado a tu canal de informes.")
 
                     await msg.remove_reaction("👀", self.bot.user)
                     await msg.add_reaction("✅")
-                    await msg.reply(respuesta)
+                    await self.enviar_texto_largo(msg.channel, respuesta, msg_original=msg)
 
                 except Exception as e:
                     await msg.remove_reaction("👀", self.bot.user)
