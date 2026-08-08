@@ -129,7 +129,7 @@ class RPSystem(commands.Cog):
         try:
             res = await self.groq.chat.completions.create(
                 messages=[{"role": "system", "content": prompt_extraccion}, {"role": "user", "content": texto_o_imagen}],
-                model="llama3-70b-8192", temperature=0.1
+                model="llama-3.3-70b-versatile", temperature=0.1
             )
             match = re.search(r'\[.*\]', res.choices[0].message.content, re.DOTALL)
             if match:
