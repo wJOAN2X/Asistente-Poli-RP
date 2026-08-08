@@ -3,21 +3,31 @@ import os
 
 DATABASE_FILE = "global_database.json"
 
-def get_guild_data(guild_id):
+def _load_data():
+    """Función interna blindada para cargar el JSON sin que el bot crashee."""
     if not os.path.exists(DATABASE_FILE):
         return {}
-    with open(DATABASE_FILE, "r") as f:
-        data = json.load(f)
+    try:
+        with open(DATABASE_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+            # Si el archivo existe pero está vacío, devuelve un diccionario vacío
+            return json.loads(content) if content.strip() else {}
+    except (json.JSONDecodeError, FileNotFoundError):
+        # Si el JSON se corrompe por un apagón o error, no crashea el bot
+        print("⚠️ Advertencia: global_database.json corrupto o no encontrado. Iniciando limpio.")
+        return {}
+
+def get_guild_data(guild_id):
+    data = _load_data()
     return data.get(str(guild_id), {})
 
 def save_guild_data(guild_id, guild_data):
-    data = {}
-    if os.path.exists(DATABASE_FILE):
-        with open(DATABASE_FILE, "r") as f:
-            data = json.load(f)
+    data = _load_data()
     data[str(guild_id)] = guild_data
-    with open(DATABASE_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    
+    # Escritura segura: asegura que no se pierdan caracteres especiales
+    with open(DATABASE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 def get_config(guild_id, key, default=None):
     data = get_guild_data(guild_id)
