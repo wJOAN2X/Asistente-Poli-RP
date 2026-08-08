@@ -13,7 +13,6 @@ class RPSystem(commands.Cog):
         self.cache_ejemplos = {}
 
     async def actualizar_archivo_manuales(self, guild):
-        """Descarga PDFs del canal #manuales, los procesa a texto y los consolida en un único archivo plano."""
         ch_manuales = discord.utils.get(guild.channels, name="manuales")
         if not ch_manuales: return
         
@@ -33,7 +32,6 @@ class RPSystem(commands.Cog):
                 f.write(texto_consolidado)
 
     async def leer_manuales_txt(self, guild):
-        """Lee el archivo consolidado de manera ultrarrápida. Si no existe, lo crea."""
         if not os.path.exists(self.txt_file_path):
             await self.actualizar_archivo_manuales(guild)
         
@@ -105,7 +103,6 @@ class RPSystem(commands.Cog):
     async def on_message(self, msg: discord.Message):
         if msg.author.bot: return
 
-        # Si suben algo al canal manuales, borramos el txt viejo y creamos uno completamente nuevo y actualizado
         if msg.channel.name == "manuales":
             if os.path.exists(self.txt_file_path):
                 os.remove(self.txt_file_path)
@@ -119,13 +116,11 @@ class RPSystem(commands.Cog):
             await msg.add_reaction("✅")
             return
 
-        # ZONA DE TRABAJO EN EL CANAL DE DUDAS Y REGISTRO
         if msg.channel.name == "💭-registro-y-dudas":
             await msg.add_reaction("👀")
             
             async with msg.channel.typing():
                 try:
-                    # Análisis visual de imágenes si las hay
                     imagen_analisis = ""
                     if msg.attachments:
                         for att in msg.attachments:
@@ -140,15 +135,13 @@ class RPSystem(commands.Cog):
                                             ]
                                         }],
                                         model="llama-3.2-11b-vision-preview"
-                                    ]
+                                    ) # <--- AQUÍ ESTABA EL ERROR MALDITO, ESTABA COMO "]"
                                     imagen_analisis += f"\n[Datos extraídos de imagen adjunta]:\n{vision_res.choices[0].message.content}\n"
                                 except Exception:
                                     pass
 
-                    # Leer manuales desde el archivo de texto plano consolidado
                     manuales_texto = await self.leer_manuales_txt(msg.guild)
 
-                    # Cargar ejemplos del usuario
                     cat = msg.channel.category
                     textos_ejemplos = ""
                     if cat:
@@ -164,7 +157,7 @@ class RPSystem(commands.Cog):
                     RECURSOS OFICIALES (Leyes y Manuales consolidados):
                     {manuales_texto[:7000]}
                     
-                    DATOS DE IMÁGENES RECIENTES / ACTUALIZACIONES (Ascensos, capturas, etc.):
+                    DATOS DE IMÁGENES RECIENTES / ACTUALIZACIONES:
                     {imagen_analisis}
                     
                     EJEMPLOS DE ESTILO Y FORMATO DEL OFICIAL:
