@@ -23,9 +23,14 @@ class RPSystem(commands.Cog):
                 if att.filename.endswith('.pdf'):
                     try:
                         pdf = PdfReader(io.BytesIO(await att.read()))
-                        texto_consolidado += "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()]) + "\n"
+                        for page in pdf.pages:
+                            try:
+                                text = page.extract_text()
+                                if text: texto_consolidado += text + "\n"
+                            except Exception:
+                                pass # Ignora páginas corruptas
                     except Exception:
-                        pass
+                        pass # Ignora PDFs completamente rotos
         
         if texto_consolidado.strip():
             with open(self.txt_file_path, "w", encoding="utf-8") as f:
@@ -81,7 +86,6 @@ class RPSystem(commands.Cog):
         ch_i = await g.create_text_channel("📋-informes", category=cat)
         ch_n = await g.create_text_channel("💭-registro-y-dudas", category=cat)
 
-        # Intento de cambiar el apodo automáticamente
         nuevo_apodo = f"[{rango}] {nombre_personaje}"
         aviso_apodo = ""
         try:
@@ -103,8 +107,6 @@ class RPSystem(commands.Cog):
         if not cat:
             return await interaction.followup.send("❌ Usa este comando dentro de tu categoría de trabajo.")
         
-        # Desglosar el nombre actual de la categoría para no perder la facción ni el personaje
-        # Formato esperado: "Faccion | Rango - Nombre"
         try:
             partes = cat.name.split(" | ", 1)
             faccion = partes[0]
@@ -115,15 +117,12 @@ class RPSystem(commands.Cog):
         nuevo_nombre_completo = f"{faccion} | {nuevo_rango} - {nombre_personaje}"
         nuevo_apodo = f"[{nuevo_rango}] {nombre_personaje}"
 
-        # 1. Actualizar el Rol
         rol_existente = discord.utils.get(u.roles, name=cat.name)
         if rol_existente:
             await rol_existente.edit(name=nuevo_nombre_completo)
 
-        # 2. Actualizar la Categoría
         await cat.edit(name=nuevo_nombre_completo)
 
-        # 3. Actualizar Apodo
         aviso_apodo = ""
         try:
             await u.edit(nick=nuevo_apodo[:32])
@@ -184,13 +183,13 @@ class RPSystem(commands.Cog):
                                         messages=[{
                                             "role": "user", 
                                             "content": [
-                                                {"type": "text", "text": "Extrae todo el texto, tablas, ascensos, rangos o información relevante que aparezca en esta imagen."},
+                                                {"type": "text", "text": "Extrae detalladamente todo el texto, tablas, nombres, rangos o información relevante que aparezca en esta imagen. Si hay listas, mantenlas estructuradas."},
                                                 {"type": "image_url", "image_url": {"url": att.url}}
                                             ]
                                         }],
                                         model="llama-3.2-11b-vision-preview"
                                     )
-                                    imagen_analisis += f"\n[Datos extraídos de imagen adjunta]:\n{vision_res.choices[0].message.content}\n"
+                                    imagen_analisis += f"\n[Datos extraídos de la imagen adjunta]:\n{vision_res.choices[0].message.content}\n"
                                 except Exception:
                                     pass
 
@@ -208,30 +207,37 @@ class RPSystem(commands.Cog):
                     sys_prompt = f"""
                     Eres el asistente operativo y de redacción policial de este servidor de Roleplay.
                     
-                    RECURSOS OFICIALES (Leyes y Manuales consolidados):
-                    {manuales_texto[:7000]}
+                    RECURSOS OFICIALES (Leyes y Manuales):
+                    {manuales_texto[:6000]}
                     
-                    DATOS DE IMÁGENES RECIENTES / ACTUALIZACIONES:
+                    DATOS DE IMÁGENES RECIENTES:
                     {imagen_analisis}
                     
                     EJEMPLOS DE ESTILO Y FORMATO DEL OFICIAL:
-                    {textos_ejemplos[:4000]}
+                    {textos_ejemplos[:3000]}
+                    
+                    CONTEXTO:
+                    {historial_chat}
                     
                     INSTRUCCIONES CLAVE:
-                    - Responde rápido y de forma directa.
-                    - Si te preguntan por un ascenso, código o procedimiento, búscalo en los manuales o en los datos de imágenes y respóndelo con precisión.
-                    - Si el usuario pide redactar un informe, toma los datos recientes del chat y ajústalos estrictamente al formato y estructura de los EJEMPLOS DE ESTILO.
+                    - Sé extremadamente directo y conciso. No uses relleno ni frases introductorias.
+                    - Si el usuario te pide extraer datos de una imagen (ej. nombres para un reporte), dáselos en el formato exacto que pide (ej. una lista limpia y ordenada en el mismo chat).
+                    - Solo debes aplicar el estilo de los ejemplos y extenderte si el usuario pide la redacción final de un informe.
                     """
 
                     res = await self.groq.chat.completions.create(
-                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Analiza el contenido adjunto."}],
+                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Procesa la imagen adjunta."}],
                         model="llama-3.3-70b-versatile",
                         temperature=0.2
                     )
 
                     respuesta = res.choices[0].message.content
 
-                    if "informe" in msg.content.lower() or "redacta" in msg.content.lower():
+                    # DISPARADOR ESTRICTO: Solo enviará al canal de informes si usas estas frases exactas.
+                    frases_informe = ["redacta el informe", "genera el informe", "redáctame un informe", "redacta un informe"]
+                    es_peticion_informe = any(frase in msg.content.lower() for frase in frases_informe)
+
+                    if es_peticion_informe:
                         if cat:
                             ch_i = discord.utils.get(cat.channels, name="📋-informes")
                             if ch_i:
