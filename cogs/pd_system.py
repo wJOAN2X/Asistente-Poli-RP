@@ -31,7 +31,7 @@ class RPSystem(commands.Cog):
             canal = self.bot.get_channel(backup_ch_id)
             if canal:
                 try:
-                    await canal.send("📦 **Backup Automático de la DB Global:**", file=discord.File(self.db_path))
+                    await canal.send("📦 **Backup de Seguridad de la DB Global:**", file=discord.File(self.db_path))
                 except Exception:
                     pass
 
@@ -124,12 +124,13 @@ class RPSystem(commands.Cog):
                             await db.execute("INSERT INTO personajes_lore (nombre, faccion, rango, historial) VALUES (?, ?, ?, ?)", (nombre, faccion, rango, accion))
                     await db.commit()
         except Exception as e:
-            await msg_ref.channel.send(f"⚠️ Error interno de la IA extrayendo datos de fondo: `{e}`")
+            pass
 
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
         if msg.author.bot: return
 
+        # 1. MANUALES
         man_ch = await self.get_config_ch("canal_manuales")
         if man_ch and msg.channel.id == man_ch and msg.attachments:
             for att in msg.attachments:
@@ -144,12 +145,33 @@ class RPSystem(commands.Cog):
             await self.hacer_backup()
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
-            usuario = await (await db.execute("SELECT * FROM usuarios WHERE ch_notas = ?", (str(msg.channel.id),))).fetchone()
-        
-        if usuario:
-            # Reacción visual para confirmar que Discord sí nos dejó leer el mensaje
+        # 2. EL BLINDAJE ANTI-WIPES (Detectamos el nombre del canal directo desde Discord)
+        if msg.channel.name == "💭-registro-y-dudas":
+            # REACCIÓN INSTANTÁNEA PARA QUE SEPAS QUE EL BOT NO ESTÁ MUERTO
             await msg.add_reaction("👀")
+
+            async with aiosqlite.connect(self.db_path) as db:
+                usuario = await (await db.execute("SELECT * FROM usuarios WHERE ch_notas = ?", (str(msg.channel.id),))).fetchone()
+
+            # SI RENDER BORRÓ LA BASE DE DATOS, EL BOT SE AUTO-SANA
+            if not usuario:
+                cat = msg.channel.category
+                if cat:
+                    ch_e = discord.utils.get(cat.channels, name="📚-ejemplos-pasados")
+                    ch_i = discord.utils.get(cat.channels, name="📋-informes")
+                    if ch_e and ch_i:
+                        async with aiosqlite.connect(self.db_path) as db:
+                            await db.execute("INSERT OR REPLACE INTO usuarios (discord_id, personaje, faccion, rango, categoria_id, ch_ejemplos, ch_informes, ch_notas, rol_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (str(msg.author.id), msg.author.display_name, "Recuperado", "N/A", str(cat.id), str(ch_e.id), str(ch_i.id), str(msg.channel.id), "N/A"))
+                            await db.commit()
+                        async with aiosqlite.connect(self.db_path) as db:
+                            usuario = await (await db.execute("SELECT * FROM usuarios WHERE ch_notas = ?", (str(msg.channel.id),))).fetchone()
+                        await msg.channel.send("🔄 **Sistema Anti-Wipes:** Render me había borrado la memoria, pero he leído la estructura de tu categoría y me he auto-configurado de nuevo. Operativo al 100%.")
+                    else:
+                        await msg.remove_reaction("👀", self.bot.user)
+                        await msg.add_reaction("❌")
+                        await msg.channel.send("⚠️ Error crítico: Render me borró la memoria y me faltan los canales originales de esta categoría para auto-sanarme.")
+                        return
+
             contenido_analizar = msg.content
 
             if msg.attachments and any(a.filename.endswith(('.mp3', '.wav', '.ogg', '.m4a')) for a in msg.attachments):
@@ -168,10 +190,9 @@ class RPSystem(commands.Cog):
                         contenido_analizar += f"\nVisual: {res.choices[0].message.content}"
                         await msg.reply("👁️ **Captura procesada en la DB.**")
                     except Exception as e:
-                        await msg.reply(f"❌ Error procesando imagen (Probablemente el modelo no esté autorizado en tu API): `{e}`")
+                        await msg.reply(f"❌ Error procesando imagen: `{e}`")
 
             if contenido_analizar.strip():
-                # Mandamos a extraer datos, pero le pasamos el msg para que avise si falla
                 await self.extraer_y_actualizar_lore_global(contenido_analizar, msg)
 
             if "informe" in msg.content.lower() or "redacta" in msg.content.lower():
