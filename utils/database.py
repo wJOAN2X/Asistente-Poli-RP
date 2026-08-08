@@ -24,6 +24,5 @@ def get_config(guild_id, key, default=None):
     return data.get("config", {}).get(key, default)
 
 def tiene_permiso(user):
-    # Lógica básica: si es admin, tiene permiso. 
-    # Aquí puedes adaptar para que revise roles específicos.
+    # Solo tú (administradores) tienen permiso para cosas críticas
     return user.guild_permissions.administrator
