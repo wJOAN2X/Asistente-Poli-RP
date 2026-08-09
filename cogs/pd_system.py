@@ -3,19 +3,20 @@ from discord.ext import commands
 from discord import app_commands
 import os, io, asyncio
 from PyPDF2 import PdfReader
-from groq import AsyncGroq
+from google import genai
+from google.genai import types
 
 class RPSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.groq = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+        # Inicializa el cliente oficial de Google GenAI con la nueva variable
+        self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.cache_plantillas = ""
         self.cache_roster = ""
         self.cache_leyes = ""
         self.cache_correcciones = ""
 
     async def enviar_texto_largo(self, canal, texto, msg_original=None):
-        """Corta el texto para no romper el límite de Discord y lo envía."""
         pedazos = [texto[i:i+1900] for i in range(0, len(texto), 1900)]
         for idx, pedazo in enumerate(pedazos):
             if idx == 0 and msg_original:
@@ -30,7 +31,7 @@ class RPSystem(commands.Cog):
         if not ch_manuales or not ch_leyes:
             return await canal_respuesta.send("❌ Faltan los canales `#manuales` o `#leyes-transcritas`.")
         
-        await canal_respuesta.send("🔄 **Procesando PDFs y transcribiéndolos a texto visible...**")
+        await canal_respuesta.send("🔄 **Procesando PDFs con Gemini y transcribiéndolos...**")
         texto_consolidado = ""
         pdfs_encontrados = 0
 
@@ -51,16 +52,14 @@ class RPSystem(commands.Cog):
                         await canal_respuesta.send(f"⚠️ Error procesando **{att.filename}**.")
 
         if texto_consolidado.strip():
-            # Limpia el canal de leyes viejo y sube la nueva transcripción
             await ch_leyes.purge(limit=100)
             await self.enviar_texto_largo(ch_leyes, f"**TRANSCRIPCIÓN DE LEYES Y MANUALES:**\n{texto_consolidado}")
-            self.cache_leyes = "" # Obliga a recargar la caché
-            await canal_respuesta.send(f"✅ **Sincronización terminada.** Revisa el canal {ch_leyes.mention} para ver cómo quedó la lectura de la IA.")
+            self.cache_leyes = ""
+            await canal_respuesta.send(f"✅ **Sincronización terminada.** Revisa el canal {ch_leyes.mention}.")
         else:
             await canal_respuesta.send("⚠️ No se encontró texto válido en los PDFs.")
 
     async def cargar_canal(self, guild, nombre_canal, limite=100):
-        """Función maestra para leer cualquier canal como base de datos."""
         canal = discord.utils.get(guild.channels, name=nombre_canal)
         texto = ""
         if canal:
@@ -79,20 +78,20 @@ class RPSystem(commands.Cog):
                 break
         if not roster_msg: return
 
-        sys_prompt = f"""
+        prompt_roster = f"""
         Actualiza el siguiente ROSTER ACTUAL usando los NUEVOS DATOS.
         ROSTER ACTUAL: {roster_msg.content}
         NUEVOS DATOS: {datos_imagen}
         Agrega oficiales nuevos al final y actualiza el rango de los existentes si fueron ascendidos.
-        Devuelve SOLO el texto completo actualizado.
+        Devuelve SOLO el texto completo actualizado en texto plano.
         """
         try:
-            res = await self.groq.chat.completions.create(
-                messages=[{"role": "system", "content": sys_prompt}],
-                model="llama-3.3-70b-versatile",
-                temperature=0.0
+            response = self.client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt_roster,
+                config=types.GenerateContentConfig(temperature=0.0)
             )
-            nuevo_roster = res.choices[0].message.content.replace("```text", "").replace("```", "").strip()
+            nuevo_roster = response.text.replace("```text", "").replace("```", "").strip()
             if roster_msg.author == self.bot.user:
                 await roster_msg.edit(content=nuevo_roster)
             else:
@@ -112,9 +111,9 @@ class RPSystem(commands.Cog):
         if not cat: cat = await g.create_category("⚙️ SISTEMA RP")
 
         canales = [
-            ("manuales", "📚 **CARGA DE PDFS**\nSube los PDFs. El bot los leerá y los transcribirá."),
-            ("leyes-transcritas", "📜 **BASE DE DATOS DE LEYES (TEXTO)**\nAquí el bot escribe lo que lee de los PDFs. Puedes editar estos mensajes para corregir el formato o pegar tú mismo el código penal para mayor precisión."),
-            ("correcciones-ia", "⚠️ **ACLARACIONES Y CORRECCIONES PARA LA IA**\nLo que escribas aquí tiene PRIORIDAD ABSOLUTA. Si la IA se confunde con una ley, acláraselo aquí."),
+            ("manuales", "📚 **CARGA DE PDFS**\nSube los PDFs. El bot los leerá y transcribirá."),
+            ("leyes-transcritas", "📜 **BASE DE DATOS DE LEYES (TEXTO)**\nAquí el bot escribe lo que lee de los PDFs. Puedes editar o pegar texto aquí directamente."),
+            ("correcciones-ia", "⚠️ **ACLARACIONES Y CORRECCIONES PARA LA IA**\nLo que escribas aquí tiene PRIORIDAD ABSOLUTA sobre las leyes."),
             ("plantillas", "📌 **PLANTILLAS GLOBALES**\nPega aquí los formatos vacíos."),
             ("roster-global", "👥 **BASE DE DATOS COMISARÍA**\nPega aquí la jerarquía y oficiales.")
         ]
@@ -163,13 +162,11 @@ class RPSystem(commands.Cog):
     async def on_message(self, msg: discord.Message):
         if msg.author.bot: return
 
-        # Auto-sincronizar si suben un PDF nuevo
         if msg.channel.name == "manuales" and msg.attachments:
             if any(a.filename.endswith('.pdf') for a in msg.attachments):
                 await self.sync_manuales(msg.guild, msg.channel)
             return
             
-        # Limpieza de caché inteligente al editar bases de datos
         if msg.channel.name in ["plantillas", "roster-global", "leyes-transcritas", "correcciones-ia"]:
             if msg.channel.name == "plantillas": self.cache_plantillas = ""
             if msg.channel.name == "roster-global": self.cache_roster = ""
@@ -185,67 +182,86 @@ class RPSystem(commands.Cog):
                 try:
                     imagen_analisis = ""
                     tiene_nombres = False
+                    image_parts = []
                     
                     if msg.attachments:
                         for att in msg.attachments:
                             if att.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
                                 try:
-                                    vision_res = await self.groq.chat.completions.create(
-                                        messages=[{
-                                            "role": "user", 
-                                            "content": [
-                                                {"type": "text", "text": "Transcribe todos los textos y datos relevantes de esta imagen."},
-                                                {"type": "image_url", "image_url": {"url": att.url}}
-                                            ]
-                                        }],
-                                        model="llama-3.2-11b-vision-preview"
+                                    img_bytes = await att.read()
+                                    # Preparar la imagen para Gemini
+                                    image_parts.append(
+                                        types.Part.from_bytes(data=img_bytes, mime_type=att.content_type or "image/jpeg")
                                     )
-                                    imagen_analisis += f"\n[Datos de imagen]:\n{vision_res.choices[0].message.content}\n"
                                     tiene_nombres = True
                                 except Exception:
                                     pass
 
-                    if tiene_nombres:
+                    if tiene_nombres and image_parts:
+                        # Extraer texto de imagen usando Gemini Vision
+                        vis_resp = self.client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=[image_parts[0], "Transcribe todos los textos, nombres y rangos de esta imagen con total precisión."]
+                        )
+                        imagen_analisis = f"\n[Datos de imagen]:\n{vis_resp.text}\n"
                         asyncio.create_task(self.auto_actualizar_roster(msg.guild, imagen_analisis))
 
-                    # Cargar TODO el contexto sin límites que asfixien a la IA (Capacidad de Llama 3: 128k tokens)
-                    if not self.cache_leyes: self.cache_leyes = await self.cargar_canal(msg.guild, "leyes-transcritas", 50)
-                    if not self.cache_correcciones: self.cache_correcciones = await self.cargar_canal(msg.guild, "correcciones-ia", 20)
+                    # Cargar bases de datos desde los canales
+                    if not self.cache_leyes: self.cache_leyes = await self.cargar_canal(msg.guild, "leyes-transcritas", 100)
+                    if not self.cache_correcciones: self.cache_correcciones = await self.cargar_canal(msg.guild, "correcciones-ia", 30)
                     if not self.cache_plantillas: self.cache_plantillas = await self.cargar_canal(msg.guild, "plantillas", 20)
-                    if not self.cache_roster: self.cache_roster = await self.cargar_canal(msg.guild, "roster-global", 20)
+                    if not self.cache_roster: self.cache_roster = await self.cargar_canal(msg.guild, "roster-global", 30)
                     
                     historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=10) if not m.author.bot])
                     es_informe = any(frase in msg.content.lower() for frase in ["redacta el informe", "genera el informe"])
 
-                    sys_prompt = f"""
-                    Eres un sistema policial estricto y de alta precisión.
+                    # Instrucción maestra consolidada para Gemini
+                    system_instruction = f"""
+                    Eres un sistema policial estricto, formal y de alta precisión para un servidor de Roleplay.
                     
-                    --- BASE DE DATOS LEYES (Lee descripciones y sanciones, NO solo títulos) ---
-                    {self.cache_leyes[:80000]}
+                    --- BASE DE DATOS LEYES ---
+                    {self.cache_leyes}
                     
                     --- REGLAS ABSOLUTAS Y CORRECCIONES DE LA COMANDANCIA ---
                     {self.cache_correcciones}
                     
-                    --- OTROS DATOS ---
-                    PLANTILLAS: {self.cache_plantillas[:3000]}
-                    ROSTER: {self.cache_roster[:3000]}
-                    IMÁGENES: {imagen_analisis}
-                    CONTEXTO RECIENTE DEL CHAT DE ESTE OFICIAL: {historial_chat}
+                    --- PLANTILLAS OFICIALES ---
+                    {self.cache_plantillas}
                     
-                    INSTRUCCIONES CLAVE:
-                    1. PRIORIDAD: Si hay un conflicto entre la 'BASE DE DATOS LEYES' y las 'REGLAS ABSOLUTAS', obedece SIEMPRE a las Reglas Absolutas.
-                    2. PRECISIÓN DE LEYES: Cuando te pregunten qué aplicar, lee detalladamente el contexto del crimen en los artículos, no te guíes solo por el título.
-                    3. RESPUESTAS: Sé militar, frío y directo. Devuelve el artículo y la condena EXACTA sin charlar.
-                    4. INFORMES: Si piden redactar, usa las plantillas.
+                    --- ROSTER DE LA COMISARÍA ---
+                    {self.cache_roster}
                     """
 
-                    res = await self.groq.chat.completions.create(
-                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Analiza el contexto."}],
-                        model="llama-3.3-70b-versatile",
-                        temperature=0.0
+                    user_prompt = f"""
+                    Contexto e imágenes recientes:
+                    {imagen_analisis}
+                    
+                    Historial reciente:
+                    {historial_chat}
+                    
+                    Pregunta o petición del oficial:
+                    {msg.content if msg.content else "Analiza el contenido adjunto."}
+                    
+                    REGLAS:
+                    1. Si hay conflicto entre leyes y las 'REGLAS ABSOLUTAS Y CORRECCIONES', obedece las correcciones.
+                    2. Lee bien las descripciones de los artículos antes de responder.
+                    3. Sé frío, directo y conciso. Sin saludos ni relleno.
+                    """
+
+                    contents = [user_prompt]
+                    if image_parts:
+                        contents.append(image_parts[0])
+
+                    response = self.client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            temperature=0.0
+                        )
                     )
 
-                    respuesta = res.choices[0].message.content
+                    respuesta = response.text
 
                     if es_informe:
                         cat = msg.channel.category
@@ -264,7 +280,7 @@ class RPSystem(commands.Cog):
                 except Exception as e:
                     await msg.remove_reaction("👀", self.bot.user)
                     await msg.add_reaction("❌")
-                    await msg.reply(f"⚠️ **Error:** `{e}`")
+                    await msg.reply(f"⚠️ **Error con Gemini:** `{e}`")
 
 async def setup(bot):
     await bot.add_cog(RPSystem(bot))
