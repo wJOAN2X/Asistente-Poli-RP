@@ -12,6 +12,7 @@ class RPSystem(commands.Cog):
         self.txt_file_path = "manual_unificado.txt"
         self.cache_ejemplos = {}
         self.cache_plantillas = ""
+        self.cache_roster = ""
 
     async def sync_manuales(self, guild, canal_respuesta):
         ch_manuales = discord.utils.get(guild.channels, name="manuales")
@@ -41,9 +42,9 @@ class RPSystem(commands.Cog):
                                 pass
                         
                         texto_consolidado += f"\n--- INICIO {att.filename} ---\n{texto_pdf}\n--- FIN {att.filename} ---\n"
-                        await canal_respuesta.send(f"✅ **{att.filename}** procesado por completo.")
+                        await canal_respuesta.send(f"✅ **{att.filename}** procesado.")
                     except Exception as e:
-                        await canal_respuesta.send(f"⚠️ Error procesando **{att.filename}**: Corrupto o protegido.")
+                        await canal_respuesta.send(f"⚠️ Error procesando **{att.filename}**: Corrupto.")
 
         if texto_consolidado.strip():
             with open(self.txt_file_path, "w", encoding="utf-8") as f:
@@ -63,16 +64,24 @@ class RPSystem(commands.Cog):
 
     async def cargar_plantillas_globales(self, guild):
         if self.cache_plantillas: return self.cache_plantillas
-        
         ch_plantillas = discord.utils.get(guild.channels, name="plantillas")
         texto_plantillas = ""
         if ch_plantillas:
             async for m in ch_plantillas.history(limit=20):
-                if m.content:
-                    texto_plantillas += f"\n--- PLANTILLA OFICIAL ---\n{m.content}\n"
-        
+                if m.content: texto_plantillas += f"\n--- PLANTILLA OFICIAL ---\n{m.content}\n"
         self.cache_plantillas = texto_plantillas
         return self.cache_plantillas
+
+    async def cargar_roster_global(self, guild):
+        if self.cache_roster: return self.cache_roster
+        ch_roster = discord.utils.get(guild.channels, name="roster-global")
+        texto_roster = ""
+        if ch_roster:
+            # Lee hasta 100 mensajes por si tienes pegada la lista de toda la comisaría en varios mensajes
+            async for m in ch_roster.history(limit=100):
+                if m.content: texto_roster += f"\n{m.content}\n"
+        self.cache_roster = texto_roster
+        return self.cache_roster
 
     async def enviar_texto_largo(self, canal, texto, msg_original=None):
         pedazos = [texto[i:i+1900] for i in range(0, len(texto), 1900)]
@@ -81,6 +90,27 @@ class RPSystem(commands.Cog):
                 await msg_original.reply(pedazo)
             else:
                 await canal.send(pedazo)
+
+    @app_commands.command(name="setup_global", description="[ADMIN] Crea la categoría maestra y canales de sistema.")
+    @app_commands.default_permissions(administrator=True)
+    async def setup_global(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        g = interaction.guild
+
+        cat = discord.utils.get(g.categories, name="⚙️ SISTEMA RP")
+        if not cat: cat = await g.create_category("⚙️ SISTEMA RP")
+
+        for ch_name, desc in [
+            ("manuales", "📚 **CANAL DE MANUALES GLOBALES**\nSube aquí los PDFs con las leyes."),
+            ("plantillas", "📌 **CANAL DE PLANTILLAS GLOBALES**\nPega aquí los formatos vacíos de informes."),
+            ("roster-global", "👥 **BASE DE DATOS DE LA COMISARÍA**\nPega aquí la lista completa de TODOS los oficiales, usen o no el bot, con sus rangos. El bot la usará para reconocer nombres en capturas y ordenarlos de mayor a menor.")
+        ]:
+            ch = discord.utils.get(g.channels, name=ch_name)
+            if not ch:
+                ch = await g.create_text_channel(ch_name, category=cat)
+                await ch.send(desc)
+
+        await interaction.followup.send("✅ Canales maestros creados con éxito.")
 
     @app_commands.command(name="sincronizar_manuales", description="Fuerza la transcripción de todos los PDFs de #manuales.")
     async def cmd_sincronizar(self, interaction: discord.Interaction):
@@ -111,36 +141,8 @@ class RPSystem(commands.Cog):
         except discord.Forbidden:
             pass
 
-        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Pide internas, manuales o escribe 'redacta el informe'.")
+        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Pide ordenamientos, internas o escribe 'redacta el informe'.")
         await interaction.followup.send(f"✅ Canales listos: {cat.jump_url}")
-
-    @app_commands.command(name="actualizar_rango", description="Actualiza tu rango por un ascenso.")
-    async def actualizar_rango(self, interaction: discord.Interaction, nuevo_rango: str):
-        await interaction.response.defer(ephemeral=True)
-        cat = interaction.channel.category
-        u = interaction.user
-
-        if not cat: return await interaction.followup.send("❌ Usa esto en tu categoría.")
-        
-        try:
-            partes = cat.name.split(" | ", 1)
-            faccion = partes[0]
-            nombre_personaje = partes[1].split(" - ", 1)[1]
-        except Exception:
-            return await interaction.followup.send("❌ Nombre de categoría corrupto.")
-
-        nuevo_nombre_completo = f"{faccion} | {nuevo_rango} - {nombre_personaje}"
-        
-        rol_existente = discord.utils.get(u.roles, name=cat.name)
-        if rol_existente: await rol_existente.edit(name=nuevo_nombre_completo)
-        await cat.edit(name=nuevo_nombre_completo)
-
-        try:
-            await u.edit(nick=f"[{nuevo_rango}] {nombre_personaje}"[:32])
-        except discord.Forbidden:
-            pass
-
-        await interaction.followup.send(f"🎖️ **¡Ascenso procesado!** Ahora eres **{nuevo_rango}**.")
 
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
@@ -152,6 +154,11 @@ class RPSystem(commands.Cog):
             
         if msg.channel.name == "plantillas":
             self.cache_plantillas = ""
+            await msg.add_reaction("✅")
+            return
+            
+        if msg.channel.name == "roster-global":
+            self.cache_roster = "" # Actualiza la caché si pegas nuevos oficiales
             await msg.add_reaction("✅")
             return
 
@@ -169,7 +176,7 @@ class RPSystem(commands.Cog):
                                         messages=[{
                                             "role": "user", 
                                             "content": [
-                                                {"type": "text", "text": "Extrae detalladamente todo el texto, tablas y nombres en formato de lista de esta imagen."},
+                                                {"type": "text", "text": "Extrae detalladamente todo el texto, tablas y nombres en formato de lista de esta imagen. Si ves nombres de personas, anótalos exactamente como aparecen."},
                                                 {"type": "image_url", "image_url": {"url": att.url}}
                                             ]
                                         }],
@@ -181,47 +188,31 @@ class RPSystem(commands.Cog):
 
                     manuales_texto = await self.leer_manuales_txt(msg.guild)
                     plantillas_texto = await self.cargar_plantillas_globales(msg.guild)
-                    historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=12) if not m.author.bot])
+                    roster_texto = await self.cargar_roster_global(msg.guild)
+                    historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=10) if not m.author.bot])
 
                     frases_informe = ["redacta el informe", "genera el informe", "redáctame un informe", "redacta un informe"]
                     es_peticion_informe = any(frase in msg.content.lower() for frase in frases_informe)
 
-                    # PROMPT ESTRICTO DE RELLENADO Y PRECISIÓN MILIMÉTRICA
-                    if es_peticion_informe:
-                        sys_prompt = f"""
-                        Eres un sistema automatizado de procesamiento de datos. NO ERES CONVERSACIONAL.
-                        Tu ÚNICO trabajo es rellenar plantillas de forma estricta.
-                        
-                        PLANTILLAS OFICIALES DISPONIBLES:
-                        {plantillas_texto[:4000]}
-                        
-                        DATOS DISPONIBLES (Contexto e Imágenes):
-                        {historial_chat}
-                        {imagen_analisis}
-                        
-                        REGLA ABSOLUTA:
-                        Toma la plantilla que corresponda al caso y RELLENA los espacios vacíos con los datos disponibles.
-                        DEVUELVE ÚNICA Y EXCLUSIVAMENTE LA PLANTILLA RELLENADA. No agregues saludos, ni introducciones, ni comentarios, ni cambies la estructura original de la plantilla.
-                        """
-                    else:
-                        sys_prompt = f"""
-                        Eres un sistema de consulta rápida de bases de datos. NO ERES CONVERSACIONAL.
-                        
-                        MANUALES: {manuales_texto[:6000]}
-                        DATOS EXTRAÍDOS DE IMÁGENES: {imagen_analisis}
-                        CONTEXTO: {historial_chat}
-                        
-                        REGLA ABSOLUTA:
-                        Responde de la manera más CORTA, DIRECTA y ESTRICTA posible.
-                        Si te piden una "interna" o "copy", devuelve SOLO EL TEXTO A COPIAR.
-                        Si te preguntan por un código o dato, da la definición en 1 o 2 oraciones máximo.
-                        CERO RELLENO. No uses frases como "Aquí tienes", "El código significa", etc. Solo da el maldito dato.
-                        """
+                    sys_prompt = f"""
+                    Eres un sistema de procesamiento de datos policiales. NO ERES CONVERSACIONAL.
+                    
+                    MANUALES Y CÓDIGOS: {manuales_texto[:4000]}
+                    PLANTILLAS OFICIALES: {plantillas_texto[:3000]}
+                    BASE DE DATOS DE LA COMISARÍA (ROSTER GLOBAL): {roster_texto[:4000]}
+                    DATOS DE IMÁGENES RECIENTES: {imagen_analisis}
+                    CONTEXTO RECIENTE: {historial_chat}
+                    
+                    REGLAS ABSOLUTAS:
+                    1. ORDENAMIENTO DE OFICIALES: Si el usuario te manda nombres o una imagen y te pide ordenarlos, BUSCA a esas personas en la "BASE DE DATOS DE LA COMISARÍA". Usa los rangos especificados allí para ordenarlos estrictamente de MAYOR a MENOR rango. Incluye el rango o abreviatura.
+                    2. PRECISIÓN: Solo devuelve el texto exacto que se te pide. Si es un código, da el significado corto. Si es un ordenamiento, da solo la lista ordenada.
+                    3. INFORMES: Si el usuario dice "redacta el informe", toma la plantilla oficial y rellénala.
+                    """
 
                     res = await self.groq.chat.completions.create(
                         messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Procesa la imagen."}],
                         model="llama-3.3-70b-versatile",
-                        temperature=0.0 # Temperatura 0.0 = Cero creatividad, 100% obediencia estricta
+                        temperature=0.0
                     )
 
                     respuesta = res.choices[0].message.content
