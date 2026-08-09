@@ -11,52 +11,68 @@ class RPSystem(commands.Cog):
         self.groq = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
         self.txt_file_path = "manual_unificado.txt"
         self.cache_ejemplos = {}
+        self.cache_plantillas = ""
 
-    async def actualizar_archivo_manuales(self, guild):
+    async def sync_manuales(self, guild, canal_respuesta):
         ch_manuales = discord.utils.get(guild.channels, name="manuales")
-        if not ch_manuales: return
+        if not ch_manuales:
+            return await canal_respuesta.send("❌ No se encontró el canal `#manuales`.")
         
+        await canal_respuesta.send("🔄 **Iniciando escaneo y transcripción de manuales...**")
         texto_consolidado = ""
-        async for m in ch_manuales.history(limit=25):
-            if m.content: texto_consolidado += f"\n{m.content}\n"
+        pdfs_encontrados = 0
+
+        async for m in ch_manuales.history(limit=30):
+            if m.content: 
+                texto_consolidado += f"\n{m.content}\n"
+            
             for att in m.attachments:
                 if att.filename.endswith('.pdf'):
+                    pdfs_encontrados += 1
                     try:
-                        pdf = PdfReader(io.BytesIO(await att.read()))
+                        pdf_bytes = await att.read()
+                        pdf = PdfReader(io.BytesIO(pdf_bytes))
+                        texto_pdf = ""
                         for page in pdf.pages:
                             try:
                                 text = page.extract_text()
-                                if text: texto_consolidado += text + "\n"
+                                if text: texto_pdf += text + "\n"
                             except Exception:
-                                pass # Ignora páginas corruptas
-                    except Exception:
-                        pass # Ignora PDFs completamente rotos
-        
+                                pass
+                        
+                        texto_consolidado += f"\n--- INICIO {att.filename} ---\n{texto_pdf}\n--- FIN {att.filename} ---\n"
+                        await canal_respuesta.send(f"✅ **{att.filename}** procesado por completo.")
+                    except Exception as e:
+                        await canal_respuesta.send(f"⚠️ Error procesando **{att.filename}**: Corrupto o protegido.")
+
         if texto_consolidado.strip():
             with open(self.txt_file_path, "w", encoding="utf-8") as f:
                 f.write(texto_consolidado)
+            await canal_respuesta.send(
+                f"📂 **Sincronización terminada.** ({pdfs_encontrados} PDFs procesados).", 
+                file=discord.File(self.txt_file_path)
+            )
+        else:
+            await canal_respuesta.send("⚠️ No se encontró texto válido.")
 
     async def leer_manuales_txt(self, guild):
         if not os.path.exists(self.txt_file_path):
-            await self.actualizar_archivo_manuales(guild)
-        
-        if os.path.exists(self.txt_file_path):
-            with open(self.txt_file_path, "r", encoding="utf-8") as f:
-                return f.read()
-        return "No hay manuales cargados."
+            return "No hay manuales cargados. Ejecuta /sincronizar_manuales."
+        with open(self.txt_file_path, "r", encoding="utf-8") as f:
+            return f.read()
 
-    async def cargar_ejemplos_usuario(self, ch_ejemplos):
-        ch_id = ch_ejemplos.id
-        if ch_id in self.cache_ejemplos:
-            return self.cache_ejemplos[ch_id]
-
-        textos_ejemplos = ""
-        async for m in ch_ejemplos.history(limit=15):
-            if not m.author.bot and m.content:
-                textos_ejemplos += f"\n--- EJEMPLO DE INFORME ---\n{m.content}\n"
+    async def cargar_plantillas_globales(self, guild):
+        if self.cache_plantillas: return self.cache_plantillas
         
-        self.cache_ejemplos[ch_id] = textos_ejemplos
-        return self.cache_ejemplos[ch_id]
+        ch_plantillas = discord.utils.get(guild.channels, name="plantillas")
+        texto_plantillas = ""
+        if ch_plantillas:
+            async for m in ch_plantillas.history(limit=20):
+                if m.content:
+                    texto_plantillas += f"\n--- PLANTILLA OFICIAL ---\n{m.content}\n"
+        
+        self.cache_plantillas = texto_plantillas
+        return self.cache_plantillas
 
     async def enviar_texto_largo(self, canal, texto, msg_original=None):
         pedazos = [texto[i:i+1900] for i in range(0, len(texto), 1900)]
@@ -66,7 +82,12 @@ class RPSystem(commands.Cog):
             else:
                 await canal.send(pedazo)
 
-    @app_commands.command(name="alta_personaje", description="Crea tus canales de trabajo y ajusta tu nombre.")
+    @app_commands.command(name="sincronizar_manuales", description="Fuerza la transcripción de todos los PDFs de #manuales.")
+    async def cmd_sincronizar(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.sync_manuales(interaction.guild, interaction.channel)
+
+    @app_commands.command(name="alta_personaje", description="Crea tus canales de trabajo.")
     async def alta(self, interaction: discord.Interaction, nombre_personaje: str, faccion: str, rango: str):
         await interaction.response.defer(ephemeral=True)
         g, u = interaction.guild, interaction.user
@@ -82,90 +103,55 @@ class RPSystem(commands.Cog):
         }
         
         cat = await g.create_category(nombre_rol, overwrites=ow)
-        ch_e = await g.create_text_channel("📚-ejemplos-pasados", category=cat)
         ch_i = await g.create_text_channel("📋-informes", category=cat)
         ch_n = await g.create_text_channel("💭-registro-y-dudas", category=cat)
 
-        nuevo_apodo = f"[{rango}] {nombre_personaje}"
-        aviso_apodo = ""
         try:
-            await u.edit(nick=nuevo_apodo[:32])
+            await u.edit(nick=f"[{rango}] {nombre_personaje}"[:32])
         except discord.Forbidden:
-            aviso_apodo = "\n*(No pude cambiar tu apodo porque eres el dueño del servidor o tienes un rol mayor al mío).* "
+            pass
 
-        await ch_e.send(f"📌 **BASE DE APRENDIZAJE**\n{u.mention} Pega aquí tus informes pasados para que la IA aprenda tu estilo.")
-        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Pide internas, haz preguntas sobre el manual, sube imágenes/audios o escribe 'redacta el informe'.")
-        
-        await interaction.followup.send(f"✅ Canales listos: {cat.jump_url}{aviso_apodo}")
+        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Pide internas, manuales o escribe 'redacta el informe'.")
+        await interaction.followup.send(f"✅ Canales listos: {cat.jump_url}")
 
-    @app_commands.command(name="actualizar_rango", description="Actualiza tu rango por un ascenso (renombra tus canales, rol y apodo).")
+    @app_commands.command(name="actualizar_rango", description="Actualiza tu rango por un ascenso.")
     async def actualizar_rango(self, interaction: discord.Interaction, nuevo_rango: str):
         await interaction.response.defer(ephemeral=True)
         cat = interaction.channel.category
         u = interaction.user
 
-        if not cat:
-            return await interaction.followup.send("❌ Usa este comando dentro de tu categoría de trabajo.")
+        if not cat: return await interaction.followup.send("❌ Usa esto en tu categoría.")
         
         try:
             partes = cat.name.split(" | ", 1)
             faccion = partes[0]
             nombre_personaje = partes[1].split(" - ", 1)[1]
         except Exception:
-            return await interaction.followup.send("❌ El nombre de tu categoría fue modificado manualmente o está corrupto. No puedo automatizar el ascenso.")
+            return await interaction.followup.send("❌ Nombre de categoría corrupto.")
 
         nuevo_nombre_completo = f"{faccion} | {nuevo_rango} - {nombre_personaje}"
-        nuevo_apodo = f"[{nuevo_rango}] {nombre_personaje}"
-
+        
         rol_existente = discord.utils.get(u.roles, name=cat.name)
-        if rol_existente:
-            await rol_existente.edit(name=nuevo_nombre_completo)
-
+        if rol_existente: await rol_existente.edit(name=nuevo_nombre_completo)
         await cat.edit(name=nuevo_nombre_completo)
 
-        aviso_apodo = ""
         try:
-            await u.edit(nick=nuevo_apodo[:32])
+            await u.edit(nick=f"[{nuevo_rango}] {nombre_personaje}"[:32])
         except discord.Forbidden:
-            aviso_apodo = "\n*(Tus canales se actualizaron, pero no pude cambiar tu apodo por falta de permisos/jerarquía).* "
+            pass
 
-        await interaction.followup.send(f"🎖️ **¡Ascenso procesado!** Ahora eres **{nuevo_rango}**.\nCanales y roles actualizados correctamente.{aviso_apodo}")
-
-    @app_commands.command(name="borrar_historial", description="Limpia la caché y memoria de tus canales.")
-    async def borrar_historial(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        cat = interaction.channel.category
-        if not cat:
-            return await interaction.followup.send("❌ Debes usar este comando dentro de tu categoría de trabajo.")
-        
-        ch_e = discord.utils.get(cat.channels, name="📚-ejemplos-pasados")
-        ch_n = discord.utils.get(cat.channels, name="💭-registro-y-dudas")
-        
-        if ch_e: 
-            if ch_e.id in self.cache_ejemplos: del self.cache_ejemplos[ch_e.id]
-            await ch_e.purge(limit=50)
-            await ch_e.send("🧹 **Canal de ejemplos limpiado.**")
-            
-        if ch_n: 
-            await ch_n.purge(limit=50)
-            await ch_n.send("🧹 **Memoria a corto plazo borrada.**")
-            
-        await interaction.followup.send("✅ Purgado completado con éxito.")
+        await interaction.followup.send(f"🎖️ **¡Ascenso procesado!** Ahora eres **{nuevo_rango}**.")
 
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
         if msg.author.bot: return
 
-        if msg.channel.name == "manuales":
-            if os.path.exists(self.txt_file_path):
-                os.remove(self.txt_file_path)
-            await self.actualizar_archivo_manuales(msg.guild)
-            await msg.add_reaction("✅")
+        if msg.channel.name == "manuales" and msg.attachments:
+            await self.sync_manuales(msg.guild, msg.channel)
             return
             
-        if msg.channel.name == "📚-ejemplos-pasados":
-            if msg.channel.id in self.cache_ejemplos:
-                del self.cache_ejemplos[msg.channel.id]
+        if msg.channel.name == "plantillas":
+            self.cache_plantillas = ""
             await msg.add_reaction("✅")
             return
 
@@ -183,69 +169,73 @@ class RPSystem(commands.Cog):
                                         messages=[{
                                             "role": "user", 
                                             "content": [
-                                                {"type": "text", "text": "Extrae detalladamente todo el texto, tablas, nombres, rangos o información relevante que aparezca en esta imagen. Si hay listas, mantenlas estructuradas."},
+                                                {"type": "text", "text": "Extrae detalladamente todo el texto, tablas y nombres en formato de lista de esta imagen."},
                                                 {"type": "image_url", "image_url": {"url": att.url}}
                                             ]
                                         }],
                                         model="llama-3.2-11b-vision-preview"
                                     )
-                                    imagen_analisis += f"\n[Datos extraídos de la imagen adjunta]:\n{vision_res.choices[0].message.content}\n"
+                                    imagen_analisis += f"\n[Datos de imagen]:\n{vision_res.choices[0].message.content}\n"
                                 except Exception:
                                     pass
 
                     manuales_texto = await self.leer_manuales_txt(msg.guild)
+                    plantillas_texto = await self.cargar_plantillas_globales(msg.guild)
+                    historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=12) if not m.author.bot])
 
-                    cat = msg.channel.category
-                    textos_ejemplos = ""
-                    if cat:
-                        ch_e = discord.utils.get(cat.channels, name="📚-ejemplos-pasados")
-                        if ch_e:
-                            textos_ejemplos = await self.cargar_ejemplos_usuario(ch_e)
+                    frases_informe = ["redacta el informe", "genera el informe", "redáctame un informe", "redacta un informe"]
+                    es_peticion_informe = any(frase in msg.content.lower() for frase in frases_informe)
 
-                    historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=10) if not m.author.bot])
-
-                    sys_prompt = f"""
-                    Eres el asistente operativo y de redacción policial de este servidor de Roleplay.
-                    
-                    RECURSOS OFICIALES (Leyes y Manuales):
-                    {manuales_texto[:6000]}
-                    
-                    DATOS DE IMÁGENES RECIENTES:
-                    {imagen_analisis}
-                    
-                    EJEMPLOS DE ESTILO Y FORMATO DEL OFICIAL:
-                    {textos_ejemplos[:3000]}
-                    
-                    CONTEXTO:
-                    {historial_chat}
-                    
-                    INSTRUCCIONES CLAVE:
-                    - Sé extremadamente directo y conciso. No uses relleno ni frases introductorias.
-                    - Si el usuario te pide extraer datos de una imagen (ej. nombres para un reporte), dáselos en el formato exacto que pide (ej. una lista limpia y ordenada en el mismo chat).
-                    - Solo debes aplicar el estilo de los ejemplos y extenderte si el usuario pide la redacción final de un informe.
-                    """
+                    # PROMPT ESTRICTO DE RELLENADO Y PRECISIÓN MILIMÉTRICA
+                    if es_peticion_informe:
+                        sys_prompt = f"""
+                        Eres un sistema automatizado de procesamiento de datos. NO ERES CONVERSACIONAL.
+                        Tu ÚNICO trabajo es rellenar plantillas de forma estricta.
+                        
+                        PLANTILLAS OFICIALES DISPONIBLES:
+                        {plantillas_texto[:4000]}
+                        
+                        DATOS DISPONIBLES (Contexto e Imágenes):
+                        {historial_chat}
+                        {imagen_analisis}
+                        
+                        REGLA ABSOLUTA:
+                        Toma la plantilla que corresponda al caso y RELLENA los espacios vacíos con los datos disponibles.
+                        DEVUELVE ÚNICA Y EXCLUSIVAMENTE LA PLANTILLA RELLENADA. No agregues saludos, ni introducciones, ni comentarios, ni cambies la estructura original de la plantilla.
+                        """
+                    else:
+                        sys_prompt = f"""
+                        Eres un sistema de consulta rápida de bases de datos. NO ERES CONVERSACIONAL.
+                        
+                        MANUALES: {manuales_texto[:6000]}
+                        DATOS EXTRAÍDOS DE IMÁGENES: {imagen_analisis}
+                        CONTEXTO: {historial_chat}
+                        
+                        REGLA ABSOLUTA:
+                        Responde de la manera más CORTA, DIRECTA y ESTRICTA posible.
+                        Si te piden una "interna" o "copy", devuelve SOLO EL TEXTO A COPIAR.
+                        Si te preguntan por un código o dato, da la definición en 1 o 2 oraciones máximo.
+                        CERO RELLENO. No uses frases como "Aquí tienes", "El código significa", etc. Solo da el maldito dato.
+                        """
 
                     res = await self.groq.chat.completions.create(
-                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Procesa la imagen adjunta."}],
+                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Procesa la imagen."}],
                         model="llama-3.3-70b-versatile",
-                        temperature=0.2
+                        temperature=0.0 # Temperatura 0.0 = Cero creatividad, 100% obediencia estricta
                     )
 
                     respuesta = res.choices[0].message.content
 
-                    # DISPARADOR ESTRICTO: Solo enviará al canal de informes si usas estas frases exactas.
-                    frases_informe = ["redacta el informe", "genera el informe", "redáctame un informe", "redacta un informe"]
-                    es_peticion_informe = any(frase in msg.content.lower() for frase in frases_informe)
-
                     if es_peticion_informe:
+                        cat = msg.channel.category
                         if cat:
                             ch_i = discord.utils.get(cat.channels, name="📋-informes")
                             if ch_i:
-                                texto_informe = f"📋 **INFORME GENERADO:**\n\n{respuesta}"
+                                texto_informe = f"📋 **INFORME:**\n\n{respuesta}"
                                 await self.enviar_texto_largo(ch_i, texto_informe)
                                 await msg.remove_reaction("👀", self.bot.user)
                                 await msg.add_reaction("✅")
-                                return await msg.reply("✅ Informe redactado y enviado a tu canal de informes.")
+                                return await msg.reply("✅ Informe enviado.")
 
                     await msg.remove_reaction("👀", self.bot.user)
                     await msg.add_reaction("✅")
@@ -254,7 +244,7 @@ class RPSystem(commands.Cog):
                 except Exception as e:
                     await msg.remove_reaction("👀", self.bot.user)
                     await msg.add_reaction("❌")
-                    await msg.reply(f"⚠️ **Error procesando la solicitud:**\n`{e}`")
+                    await msg.reply(f"⚠️ **Error:** `{e}`")
 
 async def setup(bot):
     await bot.add_cog(RPSystem(bot))
