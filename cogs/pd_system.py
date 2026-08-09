@@ -9,16 +9,28 @@ class RPSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.groq = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
-        self.txt_file_path = "manual_unificado.txt"
         self.cache_plantillas = ""
         self.cache_roster = ""
+        self.cache_leyes = ""
+        self.cache_correcciones = ""
+
+    async def enviar_texto_largo(self, canal, texto, msg_original=None):
+        """Corta el texto para no romper el límite de Discord y lo envía."""
+        pedazos = [texto[i:i+1900] for i in range(0, len(texto), 1900)]
+        for idx, pedazo in enumerate(pedazos):
+            if idx == 0 and msg_original:
+                await msg_original.reply(pedazo)
+            else:
+                await canal.send(pedazo)
 
     async def sync_manuales(self, guild, canal_respuesta):
         ch_manuales = discord.utils.get(guild.channels, name="manuales")
-        if not ch_manuales:
-            return await canal_respuesta.send("❌ No se encontró el canal `#manuales`.")
+        ch_leyes = discord.utils.get(guild.channels, name="leyes-transcritas")
         
-        await canal_respuesta.send("🔄 **Generando Backup y transcribiendo PDFs (esto puede tardar unos segundos)...**")
+        if not ch_manuales or not ch_leyes:
+            return await canal_respuesta.send("❌ Faltan los canales `#manuales` o `#leyes-transcritas`.")
+        
+        await canal_respuesta.send("🔄 **Procesando PDFs y transcribiéndolos a texto visible...**")
         texto_consolidado = ""
         pdfs_encontrados = 0
 
@@ -29,97 +41,51 @@ class RPSystem(commands.Cog):
                     try:
                         pdf_bytes = await att.read()
                         pdf = PdfReader(io.BytesIO(pdf_bytes))
-                        texto_pdf = ""
                         for page in pdf.pages:
                             try:
                                 text = page.extract_text()
-                                if text: texto_pdf += text + "\n"
+                                if text: texto_consolidado += text + "\n\n"
                             except Exception:
                                 pass
-                        
-                        texto_consolidado += f"\n--- INICIO {att.filename} ---\n{texto_pdf}\n--- FIN {att.filename} ---\n"
                     except Exception:
-                        await canal_respuesta.send(f"⚠️ Error procesando **{att.filename}** (Corrupto).")
+                        await canal_respuesta.send(f"⚠️ Error procesando **{att.filename}**.")
 
         if texto_consolidado.strip():
-            with open(self.txt_file_path, "w", encoding="utf-8") as f:
-                f.write(texto_consolidado)
-            
-            # Borrar backups anteriores del bot para mantener limpio el canal
-            async for m in ch_manuales.history(limit=20):
-                if m.author == self.bot.user and m.attachments:
-                    await m.delete()
-
-            # Enviar el nuevo Backup
-            await ch_manuales.send(
-                "📂 **BACKUP DEL CEREBRO ACTUALIZADO**\nEl bot cargará este archivo al instante cada vez que se reinicie.",
-                file=discord.File(self.txt_file_path)
-            )
-            await canal_respuesta.send(f"✅ **Sincronización terminada.** ({pdfs_encontrados} PDFs procesados y asegurados en Backup).")
+            # Limpia el canal de leyes viejo y sube la nueva transcripción
+            await ch_leyes.purge(limit=100)
+            await self.enviar_texto_largo(ch_leyes, f"**TRANSCRIPCIÓN DE LEYES Y MANUALES:**\n{texto_consolidado}")
+            self.cache_leyes = "" # Obliga a recargar la caché
+            await canal_respuesta.send(f"✅ **Sincronización terminada.** Revisa el canal {ch_leyes.mention} para ver cómo quedó la lectura de la IA.")
         else:
-            await canal_respuesta.send("⚠️ No se encontró texto válido.")
+            await canal_respuesta.send("⚠️ No se encontró texto válido en los PDFs.")
 
-    async def leer_manuales_txt(self, guild):
-        """Descarga el backup directamente de Discord para arrancar al instante."""
-        ch_manuales = discord.utils.get(guild.channels, name="manuales")
-        if ch_manuales:
-            async for m in ch_manuales.history(limit=20):
-                for att in m.attachments:
-                    if att.filename == "manual_unificado.txt":
-                        bytes_txt = await att.read()
-                        return bytes_txt.decode('utf-8')
-        return "No hay manuales cargados. Ejecuta /sincronizar_manuales."
-
-    async def cargar_plantillas_globales(self, guild):
-        if self.cache_plantillas: return self.cache_plantillas
-        ch_plantillas = discord.utils.get(guild.channels, name="plantillas")
-        texto_plantillas = ""
-        if ch_plantillas:
-            async for m in ch_plantillas.history(limit=20):
-                if m.content: texto_plantillas += f"\n--- PLANTILLA OFICIAL ---\n{m.content}\n"
-        self.cache_plantillas = texto_plantillas
-        return self.cache_plantillas
-
-    async def cargar_roster_global(self, guild):
-        ch_roster = discord.utils.get(guild.channels, name="roster-global")
-        texto_roster = ""
-        if ch_roster:
-            async for m in ch_roster.history(limit=20):
-                if m.content: texto_roster += f"\n{m.content}\n"
-        self.cache_roster = texto_roster
-        return self.cache_roster
+    async def cargar_canal(self, guild, nombre_canal, limite=100):
+        """Función maestra para leer cualquier canal como base de datos."""
+        canal = discord.utils.get(guild.channels, name=nombre_canal)
+        texto = ""
+        if canal:
+            async for m in canal.history(limit=limite, oldest_first=True):
+                if m.content: texto += f"\n{m.content}\n"
+        return texto
 
     async def auto_actualizar_roster(self, guild, datos_imagen):
-        """Proceso silencioso que actualiza el Roster global editando el mensaje si detecta oficiales nuevos o ascendidos."""
         ch_roster = discord.utils.get(guild.channels, name="roster-global")
         if not ch_roster: return
-
-        # Buscar el mensaje principal del Roster
+        
         roster_msg = None
         async for m in ch_roster.history(limit=10):
             if "ESCALA JERÁRQUICA" in m.content:
                 roster_msg = m
                 break
-        
         if not roster_msg: return
 
         sys_prompt = f"""
-        Eres el administrador de la base de datos policial.
-        
-        ROSTER ACTUAL DE LA COMISARÍA:
-        {roster_msg.content}
-        
-        NUEVOS DATOS EXTRAÍDOS DE UNA CAPTURA RECIENTE:
-        {datos_imagen}
-        
-        TAREA:
-        1. Analiza los nombres y rangos de los NUEVOS DATOS.
-        2. Compáralos con la 'LISTA DE OFICIALES ACTIVOS' del ROSTER ACTUAL.
-        3. Si un oficial NO ESTÁ en la lista, agrégalo al final de los oficiales activos.
-        4. Si un oficial YA ESTÁ pero en la captura aparece con un rango SUPERIOR, actualízalo. (Usa los números de la escala jerárquica para saber qué rango es superior). No bajes de rango a nadie.
-        5. DEVUELVE ÚNICAMENTE EL TEXTO COMPLETO DEL ROSTER ACTUALIZADO (Escala y Lista). Cero comentarios, sin bloques de código ```. Debe ser texto crudo listo para copiar.
+        Actualiza el siguiente ROSTER ACTUAL usando los NUEVOS DATOS.
+        ROSTER ACTUAL: {roster_msg.content}
+        NUEVOS DATOS: {datos_imagen}
+        Agrega oficiales nuevos al final y actualiza el rango de los existentes si fueron ascendidos.
+        Devuelve SOLO el texto completo actualizado.
         """
-        
         try:
             res = await self.groq.chat.completions.create(
                 messages=[{"role": "system", "content": sys_prompt}],
@@ -127,25 +93,14 @@ class RPSystem(commands.Cog):
                 temperature=0.0
             )
             nuevo_roster = res.choices[0].message.content.replace("```text", "").replace("```", "").strip()
-            
-            # Si el mensaje es del bot, lo edita. Si lo enviaste tú, lo borra y el bot asume el control del Roster.
             if roster_msg.author == self.bot.user:
                 await roster_msg.edit(content=nuevo_roster)
             else:
                 await roster_msg.delete()
                 await ch_roster.send(nuevo_roster)
-                
-            self.cache_roster = nuevo_roster
+            self.cache_roster = ""
         except Exception:
             pass
-
-    async def enviar_texto_largo(self, canal, texto, msg_original=None):
-        pedazos = [texto[i:i+1900] for i in range(0, len(texto), 1900)]
-        for idx, pedazo in enumerate(pedazos):
-            if idx == 0 and msg_original:
-                await msg_original.reply(pedazo)
-            else:
-                await canal.send(pedazo)
 
     @app_commands.command(name="setup_global", description="[ADMIN] Crea la categoría maestra y canales de sistema.")
     @app_commands.default_permissions(administrator=True)
@@ -156,19 +111,23 @@ class RPSystem(commands.Cog):
         cat = discord.utils.get(g.categories, name="⚙️ SISTEMA RP")
         if not cat: cat = await g.create_category("⚙️ SISTEMA RP")
 
-        for ch_name, desc in [
-            ("manuales", "📚 **CANAL DE MANUALES GLOBALES**\nSube los PDFs. El bot hará un Backup aquí mismo."),
-            ("plantillas", "📌 **CANAL DE PLANTILLAS GLOBALES**\nPega aquí los formatos vacíos."),
-            ("roster-global", "👥 **BASE DE DATOS DE LA COMISARÍA**\nPega aquí la jerarquía y lista de oficiales inicial. El bot la actualizará sola con el uso.")
-        ]:
+        canales = [
+            ("manuales", "📚 **CARGA DE PDFS**\nSube los PDFs. El bot los leerá y los transcribirá."),
+            ("leyes-transcritas", "📜 **BASE DE DATOS DE LEYES (TEXTO)**\nAquí el bot escribe lo que lee de los PDFs. Puedes editar estos mensajes para corregir el formato o pegar tú mismo el código penal para mayor precisión."),
+            ("correcciones-ia", "⚠️ **ACLARACIONES Y CORRECCIONES PARA LA IA**\nLo que escribas aquí tiene PRIORIDAD ABSOLUTA. Si la IA se confunde con una ley, acláraselo aquí."),
+            ("plantillas", "📌 **PLANTILLAS GLOBALES**\nPega aquí los formatos vacíos."),
+            ("roster-global", "👥 **BASE DE DATOS COMISARÍA**\nPega aquí la jerarquía y oficiales.")
+        ]
+
+        for ch_name, desc in canales:
             ch = discord.utils.get(g.channels, name=ch_name)
             if not ch:
                 ch = await g.create_text_channel(ch_name, category=cat)
                 await ch.send(desc)
 
-        await interaction.followup.send("✅ Canales maestros creados y vinculados.")
+        await interaction.followup.send("✅ Canales maestros creados con éxito.")
 
-    @app_commands.command(name="sincronizar_manuales", description="Fuerza la transcripción de PDFs y crea el Backup.")
+    @app_commands.command(name="sincronizar_manuales", description="Fuerza la transcripción de PDFs a #leyes-transcritas.")
     async def cmd_sincronizar(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self.sync_manuales(interaction.guild, interaction.channel)
@@ -197,20 +156,25 @@ class RPSystem(commands.Cog):
         except discord.Forbidden:
             pass
 
-        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Sube fotos o pide reportes aquí.")
-        await interaction.followup.send(f"✅ Canales listos: {cat.jump_url}")
+        await ch_n.send(f"👋 **ESPACIO DE TRABAJO**\n{u.mention} Pide reportes o resuelve dudas aquí.")
+        await interaction.followup.send(f"✅ Canales listos.")
 
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
         if msg.author.bot: return
 
+        # Auto-sincronizar si suben un PDF nuevo
         if msg.channel.name == "manuales" and msg.attachments:
-            # Solo auto-sincroniza si suben un PDF, ignorando los backups del bot
             if any(a.filename.endswith('.pdf') for a in msg.attachments):
                 await self.sync_manuales(msg.guild, msg.channel)
             return
             
-        if msg.channel.name == "plantillas" or msg.channel.name == "roster-global":
+        # Limpieza de caché inteligente al editar bases de datos
+        if msg.channel.name in ["plantillas", "roster-global", "leyes-transcritas", "correcciones-ia"]:
+            if msg.channel.name == "plantillas": self.cache_plantillas = ""
+            if msg.channel.name == "roster-global": self.cache_roster = ""
+            if msg.channel.name == "leyes-transcritas": self.cache_leyes = ""
+            if msg.channel.name == "correcciones-ia": self.cache_correcciones = ""
             await msg.add_reaction("✅")
             return
 
@@ -230,7 +194,7 @@ class RPSystem(commands.Cog):
                                         messages=[{
                                             "role": "user", 
                                             "content": [
-                                                {"type": "text", "text": "Transcribe todos los nombres y rangos exactamente como aparecen en esta imagen. Detalla todo el texto encontrado."},
+                                                {"type": "text", "text": "Transcribe todos los textos y datos relevantes de esta imagen."},
                                                 {"type": "image_url", "image_url": {"url": att.url}}
                                             ]
                                         }],
@@ -241,48 +205,54 @@ class RPSystem(commands.Cog):
                                 except Exception:
                                     pass
 
-                    # LANZAR ACTUALIZACIÓN DE ROSTER EN SEGUNDO PLANO (Sin detener la respuesta al usuario)
                     if tiene_nombres:
                         asyncio.create_task(self.auto_actualizar_roster(msg.guild, imagen_analisis))
 
-                    manuales_texto = await self.leer_manuales_txt(msg.guild)
-                    plantillas_texto = await self.cargar_plantillas_globales(msg.guild)
-                    roster_texto = await self.cargar_roster_global(msg.guild)
-                    historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=8) if not m.author.bot])
-
-                    frases_informe = ["redacta el informe", "genera el informe", "redáctame un informe", "redacta un informe"]
-                    es_peticion_informe = any(frase in msg.content.lower() for frase in frases_informe)
+                    # Cargar TODO el contexto sin límites que asfixien a la IA (Capacidad de Llama 3: 128k tokens)
+                    if not self.cache_leyes: self.cache_leyes = await self.cargar_canal(msg.guild, "leyes-transcritas", 50)
+                    if not self.cache_correcciones: self.cache_correcciones = await self.cargar_canal(msg.guild, "correcciones-ia", 20)
+                    if not self.cache_plantillas: self.cache_plantillas = await self.cargar_canal(msg.guild, "plantillas", 20)
+                    if not self.cache_roster: self.cache_roster = await self.cargar_canal(msg.guild, "roster-global", 20)
+                    
+                    historial_chat = "\n".join([f"{m.author.display_name}: {m.content}" async for m in msg.channel.history(limit=10) if not m.author.bot])
+                    es_informe = any(frase in msg.content.lower() for frase in ["redacta el informe", "genera el informe"])
 
                     sys_prompt = f"""
-                    Eres un sistema de procesamiento de datos policiales estricto.
+                    Eres un sistema policial estricto y de alta precisión.
                     
-                    MANUALES Y CÓDIGOS: {manuales_texto[:4000]}
-                    PLANTILLAS OFICIALES: {plantillas_texto[:3000]}
-                    BASE DE DATOS (ROSTER): {roster_texto[:3000]}
-                    DATOS DE IMÁGENES RECIENTES: {imagen_analisis}
-                    CONTEXTO RECIENTE: {historial_chat}
+                    --- BASE DE DATOS LEYES (Lee descripciones y sanciones, NO solo títulos) ---
+                    {self.cache_leyes[:80000]}
                     
-                    REGLAS ABSOLUTAS:
-                    1. ORDENAMIENTO: Si te envían una lista o imagen y piden ordenarla, cruza los datos con la BASE DE DATOS (ROSTER) para ordenarlos estrictamente de MAYOR a MENOR rango, incluyendo el rango al lado.
-                    2. REDACCIÓN ESTRICTA: Si piden "redacta el informe", rellena la plantilla correspondiente con los datos recabados. Devuelve SOLO la plantilla lista.
-                    3. RESPUESTAS CORTAS: Si es una duda rápida, copy o código, devuelve solo el texto útil sin palabras de relleno (nada de "Aquí tienes", etc.).
+                    --- REGLAS ABSOLUTAS Y CORRECCIONES DE LA COMANDANCIA ---
+                    {self.cache_correcciones}
+                    
+                    --- OTROS DATOS ---
+                    PLANTILLAS: {self.cache_plantillas[:3000]}
+                    ROSTER: {self.cache_roster[:3000]}
+                    IMÁGENES: {imagen_analisis}
+                    CONTEXTO RECIENTE DEL CHAT DE ESTE OFICIAL: {historial_chat}
+                    
+                    INSTRUCCIONES CLAVE:
+                    1. PRIORIDAD: Si hay un conflicto entre la 'BASE DE DATOS LEYES' y las 'REGLAS ABSOLUTAS', obedece SIEMPRE a las Reglas Absolutas.
+                    2. PRECISIÓN DE LEYES: Cuando te pregunten qué aplicar, lee detalladamente el contexto del crimen en los artículos, no te guíes solo por el título.
+                    3. RESPUESTAS: Sé militar, frío y directo. Devuelve el artículo y la condena EXACTA sin charlar.
+                    4. INFORMES: Si piden redactar, usa las plantillas.
                     """
 
                     res = await self.groq.chat.completions.create(
-                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Procesa la imagen."}],
+                        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": msg.content if msg.content else "Analiza el contexto."}],
                         model="llama-3.3-70b-versatile",
                         temperature=0.0
                     )
 
                     respuesta = res.choices[0].message.content
 
-                    if es_peticion_informe:
+                    if es_informe:
                         cat = msg.channel.category
                         if cat:
                             ch_i = discord.utils.get(cat.channels, name="📋-informes")
                             if ch_i:
-                                texto_informe = f"📋 **INFORME:**\n\n{respuesta}"
-                                await self.enviar_texto_largo(ch_i, texto_informe)
+                                await self.enviar_texto_largo(ch_i, f"📋 **INFORME:**\n\n{respuesta}")
                                 await msg.remove_reaction("👀", self.bot.user)
                                 await msg.add_reaction("✅")
                                 return await msg.reply("✅ Informe enviado.")
