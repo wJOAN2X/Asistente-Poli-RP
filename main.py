@@ -291,7 +291,8 @@ async def check_modulos_apagados(interaction: discord.Interaction):
             "plantacion": ["instalar_panel_plantacion", "plantacion_quemar_admin", "plantacion_resumen"],
             "economia": ["cuota_fac", "fondos_fac"],
             "tickets": ["panel_tickets", "ticket_configurar_rol", "ticket_configurar_log", "ticket_force_close"],
-            "sistemas": ["diagnostico_streams", "backup_now", "forzar_bitacora", "registrar_cc", "gestion_cc", "panel_streams", "check_lives"]
+            "sistemas": ["diagnostico_streams", "backup_now", "forzar_bitacora", "registrar_cc", "gestion_cc", "panel_streams", "check_lives"],
+            "fichas": ["setup_fichas"]
         }
         
         modulo_del_comando = None
