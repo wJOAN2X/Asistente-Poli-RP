@@ -22,12 +22,14 @@ class FichasSystem(commands.Cog):
         5. Etnia: Solo puede haber UNA opción (Caucásico, latino, afrodescendiente, asiático, gitano, árabe). Si dice España es caucásico, si dice América hispanohablante es latino.
         6. Breve descripción del personaje (Mínimo 5 líneas): Físico (detalles específicos de rostro, altura, tatuajes) y Psicología (Carácter, personalidad, forma de actuar). Miedos y Gustos: Deben explicar el por qué. No se aceptan gustos incoherentes o pvperos como disparar o matar.
         7. ¿Por qué viaja a Los Santos?: Justificado por su pasado. Rechaza frases vacías como "para empezar de nuevo" sin un contexto coherente.
-        8. Antecedentes (Penales y médicos): Especificar delito/tiempo o enfermedad. Si no los tiene, debe decir explícitamente "N/A".
+        8. Antecedentes (Penales y médicos): Especificar delito/tiempo o enfermedad. Si no los tiene, debe decir explícitamente "N/A" o "Ninguno".
         9. Historia del personaje (Mínimo 8 líneas completas): Estructura clara diferenciando pasado (infancia, educación), presente y futuro (ambiciones). Lo escrito arriba debe tener sentido aquí.
 
         FORMATO DE RESPUESTA:
 
-        Si CUMPLE absolutamente todo, responde SOLO con esto:
+        ====== SI LA FICHA CUMPLE ABSOLUTAMENTE TODO ======
+        Responde con el texto de aprobación y, SOLO SI tiene antecedentes médicos o penales reales (distintos a N/A), genera las plantillas correspondientes rellenadas con sus datos. Utiliza el "ID Discord del Usuario" proporcionado por el sistema.
+
         ✅ **FICHA APROBADA**
         La ficha cumple con la normativa. 
         *Recordatorio para el Staff:* 
@@ -36,7 +38,28 @@ class FichasSystem(commands.Cog):
         3. Añadir roles: Ciudadano / Ficha aceptada V2. 
         4. Cerrar ticket (Guardar y Eliminar).
 
-        Si NO CUMPLE (Usa estrictamente esta plantilla, deja solo los bullet points de los apartados fallidos y explica el motivo, elimina los bullet points que sí estén bien):
+        [SI TIENE ANTECEDENTES MÉDICOS VÁLIDOS, AGREGA ESTO]:
+        **🏥 Plantilla para Antecedentes Médicos:**
+        ```text
+        ID Discord: [ID Discord proporcionado por el sistema]
+        Nombre y Apellido: [Nombre del PJ]
+        Fecha de nacimiento y edad: [Fecha] / [Edad]
+        Antecedentes médicos: [Detalle exacto de sus antecedentes médicos]
+        ```
+
+        [SI TIENE ANTECEDENTES PENALES VÁLIDOS, AGREGA ESTO]:
+        **🚨 Plantilla para Antecedentes Penales:**
+        ```text
+        ID Discord: [ID Discord proporcionado por el sistema]
+        Nombre y apellidos IC: [Nombre del PJ]
+        Fecha de nacimiento y edad: [Fecha] / [Edad]
+        Antecedentes penales: [Detalle exacto de sus antecedentes penales y tiempo en cárcel]
+        ```
+        (NO generes las plantillas de antecedentes si el usuario puso "N/A" o no tiene).
+
+        ====== SI LA FICHA NO CUMPLE (DENEGADA) ======
+        Usa estrictamente esta plantilla, deja solo los bullet points de los apartados fallidos y explica el motivo, elimina los bullet points que sí estén bien:
+
         ## ❌ FICHA DENEGADA ❌
         📄 Tu ficha no ha sido aprobada por el momento.
 
@@ -94,30 +117,24 @@ class FichasSystem(commands.Cog):
             
             async with msg.channel.typing():
                 try:
-                    # 1. Obtenemos el texto del mensaje si lo hay
-                    contenido_ficha = msg.content
+                    # Le inyectamos a la IA el ID real de Discord del usuario que envió el mensaje
+                    contenido_ficha = f"[DATOS DEL SISTEMA]\nID Discord del Usuario: {msg.author.id}\n\n[CONTENIDO DE LA FICHA]\n{msg.content}"
 
-                    # 2. Revisamos si hay archivos adjuntos (los .txt que crea Discord)
                     if msg.attachments:
                         for adjunto in msg.attachments:
-                            # Comprobamos si termina en .txt
                             if adjunto.filename.endswith('.txt'):
                                 try:
-                                    # Leemos los bytes del archivo y los decodificamos a texto
                                     archivo_bytes = await adjunto.read()
                                     texto_extraido = archivo_bytes.decode('utf-8', errors='ignore')
-                                    
-                                    # Sumamos el texto del archivo al contenido que verá la IA
-                                    contenido_ficha += f"\n\n{texto_extraido}"
+                                    contenido_ficha += f"\n\n[CONTENIDO DEL ARCHIVO TXT]\n{texto_extraido}"
                                 except Exception as e:
                                     await msg.reply(f"⚠️ No pude leer el archivo {adjunto.filename}: {e}")
 
-                    # 3. Si después de todo está vacío, no hacemos nada
-                    if not contenido_ficha.strip():
+                    # Verificamos que haya más texto que solo el ID que inyectamos
+                    if len(msg.content.strip()) == 0 and not msg.attachments:
                         await msg.remove_reaction("👀", self.bot.user)
                         return
 
-                    # 4. Enviamos TODO el texto unificado a Gemini
                     response = self.client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=contenido_ficha,
