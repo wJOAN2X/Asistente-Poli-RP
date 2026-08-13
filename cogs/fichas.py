@@ -11,24 +11,23 @@ class FichasSystem(commands.Cog):
         self.bot = bot
         self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         
-        # El Prompt Maestro que definimos anteriormente
         self.SYSTEM_INSTRUCTION = """
         Actúa como un evaluador estricto y objetivo del equipo de "Fichas e Invitaciones" para un servidor de Roleplay. Tu objetivo es analizar exhaustivamente las fichas de personaje (PJ) enviadas por los usuarios y determinar si son aprobadas o denegadas basándote en una normativa específica. No debes tener favoritismos y debes exigir el mismo nivel de detalle a todas las fichas.
 
         NORMATIVA DE EVALUACIÓN (CRITERIOS OBLIGATORIOS):
         1. Nombre y Apellidos: Deben ser reales, acordes al país de origen y coherentes con los padres. Rechaza nombres de famosos, personajes ficticios o nombres troll.
         2. Fecha de nacimiento y Edad: La edad debe calcularse correctamente respecto a la fecha. El PJ debe ser estrictamente mayor de 18 años.
-        3. Ciudad y país de nacimiento: Debe ser un lugar real y coherente con la historia. Regla estricta: Si dice "Los Ángeles", debes rechazarlo e indicar que Los Santos se basa en Los Ángeles.
-        4. Lazos familiares: Debe incluir Nombres + Parentesco + Tipo de relación.
-        5. Etnia: Solo puede haber UNA opción (Caucásico, latino, afrodescendiente, asiático, gitano, árabe).
-        6. Breve descripción del personaje (Mínimo 5 líneas): Físico (detalles específicos) y Psicología (Carácter, personalidad). Miedos y Gustos justificados. No gustos enfocados al PVP (matar, disparar).
-        7. ¿Por qué viaja a Los Santos?: Justificado por su pasado. Rechaza frases vacías como "para empezar de nuevo".
-        8. Antecedentes: Especificar delito/tiempo o enfermedad. Si no los tiene, debe decir explícitamente "N/A".
-        9. Historia del personaje (Mínimo 8 líneas completas): Estructura clara (pasado, presente y futuro).
+        3. Ciudad y país de nacimiento: Debe ser un lugar real y coherente con la historia. Regla estricta: Si dice "Los Ángeles", debes rechazarlo e indicar que Los Santos se basa en Los Ángeles, por lo que deberá cambiarlo por Los Santos u otra ciudad.
+        4. Lazos familiares: Debe incluir Nombres + Parentesco + Tipo de relación (cómo se llevan, nivel de cercanía).
+        5. Etnia: Solo puede haber UNA opción (Caucásico, latino, afrodescendiente, asiático, gitano, árabe). Si dice España es caucásico, si dice América hispanohablante es latino.
+        6. Breve descripción del personaje (Mínimo 5 líneas): Físico (detalles específicos de rostro, altura, tatuajes) y Psicología (Carácter, personalidad, forma de actuar). Miedos y Gustos: Deben explicar el por qué. No se aceptan gustos incoherentes o pvperos como disparar o matar.
+        7. ¿Por qué viaja a Los Santos?: Justificado por su pasado. Rechaza frases vacías como "para empezar de nuevo" sin un contexto coherente.
+        8. Antecedentes (Penales y médicos): Especificar delito/tiempo o enfermedad. Si no los tiene, debe decir explícitamente "N/A".
+        9. Historia del personaje (Mínimo 8 líneas completas): Estructura clara diferenciando pasado (infancia, educación), presente y futuro (ambiciones). Lo escrito arriba debe tener sentido aquí.
 
         FORMATO DE RESPUESTA:
 
-        Si CUMPLE todo:
+        Si CUMPLE absolutamente todo, responde SOLO con esto:
         ✅ **FICHA APROBADA**
         La ficha cumple con la normativa. 
         *Recordatorio para el Staff:* 
@@ -37,12 +36,12 @@ class FichasSystem(commands.Cog):
         3. Añadir roles: Ciudadano / Ficha aceptada V2. 
         4. Cerrar ticket (Guardar y Eliminar).
 
-        Si NO CUMPLE (Usa estrictamente esta plantilla, deja solo los bullet points fallidos):
+        Si NO CUMPLE (Usa estrictamente esta plantilla, deja solo los bullet points de los apartados fallidos y explica el motivo, elimina los bullet points que sí estén bien):
         ## ❌ FICHA DENEGADA ❌
         📄 Tu ficha no ha sido aprobada por el momento.
 
         Por favor, corrige lo siguiente:
-        > - **[Nombre del apartado fallido]:** [Explicación clara de por qué falló].
+        > - **[Nombre del apartado fallido]:** [Explicación clara de por qué falló según la normativa].
 
         🔁 _Puedes editar sobre lo que escribiste y si no te alcanza, debes enviarla de nuevo **completa** en varios mensajes de ser necesario. Recuerda en todo momento seguir la plantilla establecida._
 
@@ -53,7 +52,6 @@ class FichasSystem(commands.Cog):
         """
 
     async def enviar_texto_largo(self, canal, texto, msg_original=None):
-        """Divide el texto si supera el límite de caracteres de Discord."""
         pedazos = [texto[i:i+1900] for i in range(0, len(texto), 1900)]
         for idx, pedazo in enumerate(pedazos):
             if idx == 0 and msg_original:
@@ -79,7 +77,7 @@ class FichasSystem(commands.Cog):
             instrucciones = (
                 "🤖 **MÓDULO DE REVISIÓN AUTOMÁTICA ACTIVO**\n"
                 "Todo mensaje enviado en este canal será tratado como una ficha de personaje.\n"
-                "Pega la ficha completa y la IA te responderá con la plantilla de aprobación o rechazo."
+                "Puedes pegar la ficha completa directamente o **adjuntar un archivo `.txt`** si tu ficha es demasiado larga."
             )
             await ch.send(instrucciones)
             await interaction.followup.send(f"✅ Canal {ch.mention} creado con éxito.")
@@ -88,20 +86,41 @@ class FichasSystem(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
-        # Ignorar bots
         if msg.author.bot: 
             return
 
-        # Solo actuar si el mensaje se envía en el canal correcto
         if msg.channel.name == "revision-fichas":
-            await msg.add_reaction("👀") # Indicador visual de que está leyendo
+            await msg.add_reaction("👀")
             
             async with msg.channel.typing():
                 try:
-                    # Configuración estricta (temperature=0.0) para que no invente reglas y se ciña a la plantilla
+                    # 1. Obtenemos el texto del mensaje si lo hay
+                    contenido_ficha = msg.content
+
+                    # 2. Revisamos si hay archivos adjuntos (los .txt que crea Discord)
+                    if msg.attachments:
+                        for adjunto in msg.attachments:
+                            # Comprobamos si termina en .txt
+                            if adjunto.filename.endswith('.txt'):
+                                try:
+                                    # Leemos los bytes del archivo y los decodificamos a texto
+                                    archivo_bytes = await adjunto.read()
+                                    texto_extraido = archivo_bytes.decode('utf-8', errors='ignore')
+                                    
+                                    # Sumamos el texto del archivo al contenido que verá la IA
+                                    contenido_ficha += f"\n\n{texto_extraido}"
+                                except Exception as e:
+                                    await msg.reply(f"⚠️ No pude leer el archivo {adjunto.filename}: {e}")
+
+                    # 3. Si después de todo está vacío, no hacemos nada
+                    if not contenido_ficha.strip():
+                        await msg.remove_reaction("👀", self.bot.user)
+                        return
+
+                    # 4. Enviamos TODO el texto unificado a Gemini
                     response = self.client.models.generate_content(
                         model='gemini-2.5-flash',
-                        contents=msg.content,
+                        contents=contenido_ficha,
                         config=types.GenerateContentConfig(
                             system_instruction=self.SYSTEM_INSTRUCTION,
                             temperature=0.0 
@@ -110,7 +129,6 @@ class FichasSystem(commands.Cog):
 
                     respuesta = response.text
 
-                    # Cambiar la reacción al terminar
                     await msg.remove_reaction("👀", self.bot.user)
                     
                     if "FICHA APROBADA" in respuesta:
@@ -118,7 +136,6 @@ class FichasSystem(commands.Cog):
                     else:
                         await msg.add_reaction("❌")
 
-                    # Enviar la respuesta analizada
                     await self.enviar_texto_largo(msg.channel, respuesta, msg_original=msg)
 
                 except Exception as e:
